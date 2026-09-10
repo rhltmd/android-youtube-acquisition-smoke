@@ -9,7 +9,8 @@ Auto Music Shorts V1/V2/cloud-mobile code.
 - URL paste and Android `ACTION_SEND` (`text/plain`)
 - `youtubedl-android` 0.18.1, arm64-v8a only
 - refresh to latest stable yt-dlp before each test
-- metadata fetch followed by one pre-merged video+audio format download
+- metadata fetch followed by yt-dlp `bestaudio` single-stream download
+- original audio container only; no FFmpeg merge or transcode
 - no cookies, login, proxy/VPN configuration, or manual PO Token
 - output only under the app's `cacheDir`
 - Android `MediaMetadataRetriever` duration/media validation
