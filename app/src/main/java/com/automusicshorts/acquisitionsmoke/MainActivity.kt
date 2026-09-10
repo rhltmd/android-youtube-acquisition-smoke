@@ -169,7 +169,7 @@ class MainActivity : Activity() {
                     appendLine("yt-dlp version: $ytDlpVersion")
                 }
 
-                ui(status = "단일 video+audio format 다운로드 중", details = metadataReport)
+                ui(status = "bestaudio 단일 스트림 다운로드 중", details = metadataReport)
                 val outputTemplate = File(workDir, "%(id)s.%(ext)s").absolutePath
                 val request = YoutubeDLRequest(url).apply {
                     addOption("--no-playlist")
@@ -178,7 +178,7 @@ class MainActivity : Activity() {
                     addOption("--restrict-filenames")
                     addOption(
                         "--format",
-                        "best[ext=mp4][vcodec!=none][acodec!=none]/best[vcodec!=none][acodec!=none]",
+                        "bestaudio",
                     )
                     addOption("--output", outputTemplate)
                 }
