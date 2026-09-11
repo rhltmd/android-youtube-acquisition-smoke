@@ -21,6 +21,8 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
+internal const val MOBILE_UPLOAD_TOKEN_HEADER = "X-Music-Shorts-Token"
+
 data class PendingCloudUpload(
     val file: File,
     val youtubeUrl: String,
@@ -118,7 +120,7 @@ class MobileUploadClient {
             readTimeout = 180_000
             doOutput = true
             setChunkedStreamingMode(64 * 1024)
-            setRequestProperty("Authorization", "Bearer $token")
+            setRequestProperty(MOBILE_UPLOAD_TOKEN_HEADER, token)
             setRequestProperty("Accept", "application/json")
             setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
         }

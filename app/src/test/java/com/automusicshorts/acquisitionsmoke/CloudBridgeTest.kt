@@ -6,6 +6,11 @@ import org.junit.Test
 
 class CloudBridgeTest {
     @Test
+    fun uploadUsesCodespacesSafeCustomTokenHeader() {
+        assertEquals("X-Music-Shorts-Token", MOBILE_UPLOAD_TOKEN_HEADER)
+    }
+
+    @Test
     fun endpointRequiresHttpsAndAddsMobileSourcePath() {
         assertEquals(
             "https://example.app.github.dev/mobile-source",
