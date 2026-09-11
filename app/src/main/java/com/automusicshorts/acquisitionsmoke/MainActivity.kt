@@ -27,16 +27,25 @@ import java.util.concurrent.atomic.AtomicBoolean
 class MainActivity : Activity() {
     private val executor = Executors.newSingleThreadExecutor()
     private val running = AtomicBoolean(false)
+    private val uploadClient = MobileUploadClient()
 
+    private lateinit var pairingStore: PairingStore
+    private lateinit var cloudUrlInput: EditText
+    private lateinit var tokenInput: EditText
     private lateinit var urlInput: EditText
     private lateinit var startButton: Button
+    private lateinit var retryButton: Button
     private lateinit var progressBar: ProgressBar
     private lateinit var statusText: TextView
     private lateinit var resultText: TextView
+    @Volatile private var pendingUpload: PendingCloudUpload? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pairingStore = PairingStore(this)
         setContentView(buildUi())
+        cloudUrlInput.setText(pairingStore.cloudUrl())
+        tokenInput.setText(pairingStore.token())
         acceptSharedUrl(intent)
     }
 
@@ -66,10 +75,24 @@ class MainActivity : Activity() {
             setTypeface(typeface, Typeface.BOLD)
         })
         content.addView(TextView(this).apply {
-            text = "쿠키·로그인·프록시·수동 PO Token 없이, 앱 내부 yt-dlp가 실제 media를 받는지만 확인합니다. 파일은 앱 cacheDir에만 저장됩니다."
+            text = "앱 내부 yt-dlp로 bestaudio를 받은 뒤 기존 Cloud uploaded-file 경로로 자동 전송합니다."
             textSize = 14f
             setPadding(0, dp(10), 0, dp(18))
         })
+
+        cloudUrlInput = EditText(this).apply {
+            hint = "Cloud URL (https://...-8765.app.github.dev)"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            maxLines = 2
+        }
+        content.addView(cloudUrlInput, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+
+        tokenInput = EditText(this).apply {
+            hint = "Pairing token"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            maxLines = 1
+        }
+        content.addView(tokenInput, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
 
         urlInput = EditText(this).apply {
             hint = "https://www.youtube.com/watch?v=..."
@@ -79,10 +102,17 @@ class MainActivity : Activity() {
         content.addView(urlInput, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
 
         startButton = Button(this).apply {
-            text = "다운로드 테스트"
+            text = "다운로드 및 Cloud 프로젝트 생성"
             setOnClickListener { startSmoke() }
         }
         content.addView(startButton, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+
+        retryButton = Button(this).apply {
+            text = "Cloud 업로드 다시 시도"
+            visibility = View.GONE
+            setOnClickListener { retryUpload() }
+        }
+        content.addView(retryButton, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
 
         progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
             max = 100
@@ -132,8 +162,15 @@ class MainActivity : Activity() {
             urlInput.error = "유효한 HTTPS YouTube URL을 입력해주세요."
             return
         }
+        val pairing = pairingSettings() ?: run {
+            running.set(false)
+            return
+        }
+        pairingStore.save(pairing.first, pairing.second)
 
         startButton.isEnabled = false
+        pendingUpload = null
+        retryButton.visibility = View.GONE
         progressBar.visibility = View.VISIBLE
         progressBar.progress = 0
         statusText.text = "yt-dlp runtime 초기화 중"
@@ -199,25 +236,29 @@ class MainActivity : Activity() {
                     ?: error("yt-dlp exited successfully but no media file exists in cacheDir")
                 val media = inspectMedia(mediaFile)
                 val outputTail = response.out.takeLast(1_500).trim()
-
-                ui(
-                    status = "SUCCESS",
-                    progress = 100,
-                    details = buildString {
-                        append(metadataReport)
-                        appendLine("Download: PASS")
-                        appendLine("Exit code: ${response.exitCode}")
-                        appendLine("Elapsed: ${"%.2f".format(Locale.US, response.elapsedTime / 1000.0)} s")
-                        appendLine("Cache file: ${mediaFile.name}")
-                        appendLine("File size: ${formatBytes(mediaFile.length())}")
-                        appendLine("Android media validation: PASS")
-                        appendLine("Duration: ${media.durationMs} ms")
-                        appendLine("MIME: ${media.mime ?: "unknown"}")
-                        appendLine("Has video: ${media.hasVideo ?: "unknown"}")
-                        appendLine("Has audio: ${media.hasAudio ?: "unknown"}")
-                        if (outputTail.isNotEmpty()) appendLine("\nyt-dlp output tail:\n$outputTail")
-                    },
+                val acquisitionReport = buildString {
+                    append(metadataReport)
+                    appendLine("Acquisition: PASS")
+                    appendLine("Download: PASS")
+                    appendLine("Exit code: ${response.exitCode}")
+                    appendLine("Elapsed: ${"%.2f".format(Locale.US, response.elapsedTime / 1000.0)} s")
+                    appendLine("Cache file: ${mediaFile.name}")
+                    appendLine("File size: ${formatBytes(mediaFile.length())}")
+                    appendLine("Android media validation: PASS")
+                    appendLine("Duration: ${media.durationMs} ms")
+                    appendLine("MIME: ${media.mime ?: "unknown"}")
+                    appendLine("Has video: ${media.hasVideo ?: "unknown"}")
+                    appendLine("Has audio: ${media.hasAudio ?: "unknown"}")
+                    if (outputTail.isNotEmpty()) appendLine("\nyt-dlp output tail:\n$outputTail")
+                }
+                val acquired = PendingCloudUpload(
+                    file = mediaFile,
+                    youtubeUrl = url,
+                    projectName = (info.title ?: "Android YouTube upload").take(80),
+                    durationMs = media.durationMs,
                 )
+                pendingUpload = acquired
+                uploadToCloud(acquired, pairing.first, pairing.second, acquisitionReport)
             } catch (error: Throwable) {
                 val message = generateSequence(error) { it.cause }
                     .mapNotNull { it.message }
@@ -225,7 +266,7 @@ class MainActivity : Activity() {
                     .joinToString("\nCaused by: ")
                     .ifBlank { error.javaClass.name }
                 ui(
-                    status = "FAIL",
+                    status = "Acquisition: FAIL",
                     details = buildString {
                         appendLine("Network: ${networkLabel()}")
                         appendLine("Failure type: ${classifyFailure(message)}")
@@ -241,6 +282,93 @@ class MainActivity : Activity() {
                 }
             }
         }
+    }
+
+    private fun retryUpload() {
+        val acquired = pendingUpload
+        if (acquired == null || !acquired.file.isFile) {
+            statusText.text = "재시도할 acquisition 파일이 없습니다."
+            retryButton.visibility = View.GONE
+            return
+        }
+        if (!running.compareAndSet(false, true)) return
+        val pairing = pairingSettings() ?: run {
+            running.set(false)
+            return
+        }
+        pairingStore.save(pairing.first, pairing.second)
+        startButton.isEnabled = false
+        retryButton.isEnabled = false
+        progressBar.progress = 0
+        executor.execute {
+            try {
+                uploadToCloud(
+                    acquired,
+                    pairing.first,
+                    pairing.second,
+                    "Acquisition: PASS (cached file reused)\nFile size: ${formatBytes(acquired.file.length())}\n",
+                )
+            } finally {
+                running.set(false)
+                runOnUiThread {
+                    startButton.isEnabled = true
+                    retryButton.isEnabled = true
+                }
+            }
+        }
+    }
+
+    private fun uploadToCloud(
+        acquired: PendingCloudUpload,
+        cloudUrl: String,
+        token: String,
+        acquisitionReport: String,
+    ) {
+        ui(status = "Acquisition: PASS · Cloud 업로드 중", details = acquisitionReport, progress = 0)
+        try {
+            val uploaded = uploadClient.upload(cloudUrl, token, acquired) { progress ->
+                ui(status = "Acquisition: PASS · Upload $progress%", progress = progress)
+            }
+            ui(
+                status = "Acquisition: PASS · Upload: PASS",
+                progress = 100,
+                retryVisible = false,
+                details = buildString {
+                    append(acquisitionReport)
+                    appendLine("Upload: PASS")
+                    appendLine("Uploaded bytes: ${uploaded.uploadedBytes}")
+                    appendLine("Project ID: ${uploaded.projectId}")
+                    appendLine("Cloud response: ${uploaded.responseBody}")
+                },
+            )
+        } catch (error: CloudBridgeException) {
+            ui(
+                status = "Acquisition: PASS · Upload: FAIL",
+                retryVisible = true,
+                details = buildString {
+                    append(acquisitionReport)
+                    appendLine("Upload: FAIL")
+                    appendLine("Failure type: ${error.category}")
+                    appendLine("Error: ${error.message}")
+                    appendLine("다운로드한 cache 파일은 유지됐습니다. Cloud 업로드 다시 시도를 누를 수 있습니다.")
+                },
+            )
+        }
+    }
+
+    private fun pairingSettings(): Pair<String, String>? {
+        val cloudUrl = cloudUrlInput.text.toString().trim().trimEnd('/')
+        val token = tokenInput.text.toString()
+        val uri = runCatching { Uri.parse(cloudUrl) }.getOrNull()
+        if (uri?.scheme?.equals("https", ignoreCase = true) != true || uri.host.isNullOrBlank()) {
+            cloudUrlInput.error = "유효한 HTTPS Cloud URL을 입력해주세요."
+            return null
+        }
+        if (token.isBlank()) {
+            tokenInput.error = "Pairing token을 입력해주세요."
+            return null
+        }
+        return cloudUrl to token
     }
 
     private fun normalizeYoutubeUrl(raw: String): String? {
@@ -302,11 +430,17 @@ class MainActivity : Activity() {
         else -> "OTHER"
     }
 
-    private fun ui(status: String, details: String? = null, progress: Int? = null) {
+    private fun ui(
+        status: String,
+        details: String? = null,
+        progress: Int? = null,
+        retryVisible: Boolean? = null,
+    ) {
         runOnUiThread {
             statusText.text = status
             details?.let { resultText.text = it }
             progress?.let { progressBar.progress = it.coerceIn(0, 100) }
+            retryVisible?.let { retryButton.visibility = if (it) View.VISIBLE else View.GONE }
         }
     }
 
