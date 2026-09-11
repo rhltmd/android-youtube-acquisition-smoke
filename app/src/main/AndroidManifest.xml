@@ -6,7 +6,7 @@
     <application
         android:allowBackup="false"
         android:extractNativeLibs="true"
-        android:label="YouTube Acquisition Smoke"
+        android:label="YouTube Acquisition Smoke Audio"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:usesCleartextTraffic="false">
