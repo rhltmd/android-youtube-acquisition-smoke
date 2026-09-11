@@ -45,4 +45,5 @@ android {
 
 dependencies {
     implementation("io.github.junkfood02.youtubedl-android:library:0.18.1")
+    testImplementation("junit:junit:4.13.2")
 }
