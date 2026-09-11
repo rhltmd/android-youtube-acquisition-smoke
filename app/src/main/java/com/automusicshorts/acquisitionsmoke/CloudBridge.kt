@@ -30,9 +30,22 @@ data class PendingCloudUpload(
     val durationMs: Long,
 )
 
+data class PendingBackgroundUpload(
+    val file: File,
+    val youtubeUrl: String,
+    val projectId: String,
+)
+
 data class CloudUploadResult(
     val projectId: String,
     val uploadedBytes: Long,
+    val responseBody: String,
+)
+
+data class BackgroundUploadResult(
+    val projectId: String,
+    val uploadedBytes: Long,
+    val durationMs: Long,
     val responseBody: String,
 )
 
@@ -189,6 +202,88 @@ class MobileUploadClient {
         }
     }
 
+    fun uploadBackground(
+        cloudBaseUrl: String,
+        token: String,
+        pending: PendingBackgroundUpload,
+        progress: (Int) -> Unit,
+    ): BackgroundUploadResult {
+        val endpoint = mobileBackgroundEndpoint(cloudBaseUrl)
+        val boundary = "MusicShortsBackground-${System.currentTimeMillis()}"
+        val hash = sha256(pending.file)
+        val connection = (endpoint.openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 15_000
+            readTimeout = 180_000
+            doOutput = true
+            setChunkedStreamingMode(64 * 1024)
+            setRequestProperty(MOBILE_UPLOAD_TOKEN_HEADER, token)
+            setRequestProperty("Accept", "application/json")
+            setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+        }
+
+        try {
+            DataOutputStream(BufferedOutputStream(connection.outputStream)).use { output ->
+                backgroundUploadFields(pending, hash).forEach { (name, value) ->
+                    writeField(output, boundary, name, value)
+                }
+                output.writeBytes("--$boundary\r\n")
+                output.writeBytes(
+                    "Content-Disposition: form-data; name=\"media\"; filename=\"${pending.file.name}\"\r\n",
+                )
+                output.writeBytes("Content-Type: ${backgroundContentType(pending.file)}\r\n\r\n")
+                val total = pending.file.length().coerceAtLeast(1L)
+                var sent = 0L
+                pending.file.inputStream().buffered().use { input ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        output.write(buffer, 0, count)
+                        sent += count
+                        progress(((sent * 100) / total).toInt().coerceIn(0, 100))
+                    }
+                }
+                output.writeBytes("\r\n--$boundary--\r\n")
+            }
+
+            val status = connection.responseCode
+            val responseBody = (if (status in 200..299) connection.inputStream else connection.errorStream)
+                ?.bufferedReader(Charsets.UTF_8)
+                ?.use { it.readText() }
+                .orEmpty()
+            if (status !in 200..299) {
+                throw CloudBridgeException(classifyHttpStatus(status), "HTTP $status: ${responseMessage(responseBody)}")
+            }
+            val payload = JSONObject(responseBody)
+            if (!payload.optBoolean("ok")) {
+                throw CloudBridgeException("UPLOAD_FAILURE", responseMessage(responseBody))
+            }
+            val projectId = payload.optString("project_id")
+            if (projectId != pending.projectId) {
+                throw CloudBridgeException("PROJECT_CREATION_FAILURE", "Cloud response project_id mismatch")
+            }
+            return BackgroundUploadResult(
+                projectId = projectId,
+                uploadedBytes = payload.optLong("uploaded_bytes", pending.file.length()),
+                durationMs = payload.optLong("duration_ms"),
+                responseBody = responseBody,
+            )
+        } catch (error: CloudBridgeException) {
+            throw error
+        } catch (error: UnknownHostException) {
+            throw CloudBridgeException("SERVER_UNREACHABLE", error.message ?: "Unknown host", error)
+        } catch (error: ConnectException) {
+            throw CloudBridgeException("SERVER_UNREACHABLE", error.message ?: "Connection failed", error)
+        } catch (error: SocketTimeoutException) {
+            throw CloudBridgeException("SERVER_UNREACHABLE", error.message ?: "Connection timed out", error)
+        } catch (error: Exception) {
+            throw CloudBridgeException("UPLOAD_FAILURE", error.message ?: error.javaClass.name, error)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
     private fun writeField(output: DataOutputStream, boundary: String, name: String, value: String) {
         output.writeBytes("--$boundary\r\n")
         output.writeBytes("Content-Disposition: form-data; name=\"$name\"\r\n\r\n")
@@ -218,6 +313,14 @@ class MobileUploadClient {
         else -> "application/octet-stream"
     }
 
+    private fun backgroundContentType(file: File): String = when (file.extension.lowercase()) {
+        "mp4" -> "video/mp4"
+        "mov" -> "video/quicktime"
+        "webm" -> "video/webm"
+        "mkv" -> "video/x-matroska"
+        else -> "application/octet-stream"
+    }
+
     private fun responseMessage(responseBody: String): String {
         return runCatching {
             val payload = JSONObject(responseBody)
@@ -235,6 +338,27 @@ internal fun mobileSourceEndpoint(baseUrl: String): URL {
     }
     return URL("$normalized/mobile-source")
 }
+
+internal fun mobileBackgroundEndpoint(baseUrl: String): URL {
+    val normalized = baseUrl.trim().trimEnd('/')
+    val uri = runCatching { URI(normalized) }.getOrNull()
+        ?: throw CloudBridgeException("SERVER_UNREACHABLE", "Cloud URL이 올바르지 않습니다.")
+    if (!uri.scheme.equals("https", ignoreCase = true) || uri.host.isNullOrBlank()) {
+        throw CloudBridgeException("SERVER_UNREACHABLE", "HTTPS Cloud URL을 입력해주세요.")
+    }
+    return URL("$normalized/mobile-background")
+}
+
+internal fun backgroundUploadFields(
+    pending: PendingBackgroundUpload,
+    sha256: String,
+): Map<String, String> = linkedMapOf(
+    "project_id" to pending.projectId,
+    "youtube_url" to pending.youtubeUrl,
+    "original_filename" to pending.file.name,
+    "size" to pending.file.length().toString(),
+    "sha256" to sha256,
+)
 
 internal fun classifyHttpStatus(status: Int): String = when (status) {
     401, 403 -> "AUTH_FAILURE"

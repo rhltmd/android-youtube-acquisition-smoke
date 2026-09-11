@@ -33,12 +33,18 @@ class MainActivity : Activity() {
     private lateinit var cloudUrlInput: EditText
     private lateinit var tokenInput: EditText
     private lateinit var urlInput: EditText
+    private lateinit var backgroundUrlInput: EditText
     private lateinit var startButton: Button
     private lateinit var retryButton: Button
     private lateinit var progressBar: ProgressBar
     private lateinit var statusText: TextView
     private lateinit var resultText: TextView
     @Volatile private var pendingUpload: PendingCloudUpload? = null
+    @Volatile private var pendingBackgroundUpload: PendingBackgroundUpload? = null
+    @Volatile private var pendingBackgroundUrl: String? = null
+    @Volatile private var createdProjectId: String? = null
+    @Volatile private var retryStage: RetryStage? = null
+    @Volatile private var latestReport: String = ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -75,7 +81,7 @@ class MainActivity : Activity() {
             setTypeface(typeface, Typeface.BOLD)
         })
         content.addView(TextView(this).apply {
-            text = "앱 내부 yt-dlp로 bestaudio를 받은 뒤 기존 Cloud uploaded-file 경로로 자동 전송합니다."
+            text = "노래 bestaudio와 배경 단일 video stream을 휴대폰에서 받은 뒤 같은 Cloud 프로젝트에 자동 연결합니다."
             textSize = 14f
             setPadding(0, dp(10), 0, dp(18))
         })
@@ -101,6 +107,17 @@ class MainActivity : Activity() {
         }
         content.addView(urlInput, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
 
+        backgroundUrlInput = EditText(this).apply {
+            hint = "Background YouTube URL"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            maxLines = 3
+        }
+        content.addView(
+            backgroundUrlInput,
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        )
+
         startButton = Button(this).apply {
             text = "다운로드 및 Cloud 프로젝트 생성"
             setOnClickListener { startSmoke() }
@@ -108,7 +125,7 @@ class MainActivity : Activity() {
         content.addView(startButton, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
 
         retryButton = Button(this).apply {
-            text = "Cloud 업로드 다시 시도"
+            text = "실패 단계 다시 시도"
             visibility = View.GONE
             setOnClickListener { retryUpload() }
         }
@@ -162,6 +179,12 @@ class MainActivity : Activity() {
             urlInput.error = "유효한 HTTPS YouTube URL을 입력해주세요."
             return
         }
+        val backgroundUrl = normalizeYoutubeUrl(backgroundUrlInput.text.toString())
+        if (backgroundUrl == null) {
+            running.set(false)
+            backgroundUrlInput.error = "유효한 HTTPS YouTube URL을 입력해주세요."
+            return
+        }
         val pairing = pairingSettings() ?: run {
             running.set(false)
             return
@@ -170,6 +193,10 @@ class MainActivity : Activity() {
 
         startButton.isEnabled = false
         pendingUpload = null
+        pendingBackgroundUpload = null
+        pendingBackgroundUrl = backgroundUrl
+        createdProjectId = null
+        retryStage = null
         retryButton.visibility = View.GONE
         progressBar.visibility = View.VISIBLE
         progressBar.progress = 0
@@ -258,7 +285,15 @@ class MainActivity : Activity() {
                     durationMs = media.durationMs,
                 )
                 pendingUpload = acquired
-                uploadToCloud(acquired, pairing.first, pairing.second, acquisitionReport)
+                latestReport = acquisitionReport
+                uploadSongAndContinue(
+                    acquired,
+                    backgroundUrl,
+                    pairing.first,
+                    pairing.second,
+                    acquisitionReport,
+                    workDir,
+                )
             } catch (error: Throwable) {
                 val message = generateSequence(error) { it.cause }
                     .mapNotNull { it.message }
@@ -285,12 +320,6 @@ class MainActivity : Activity() {
     }
 
     private fun retryUpload() {
-        val acquired = pendingUpload
-        if (acquired == null || !acquired.file.isFile) {
-            statusText.text = "재시도할 acquisition 파일이 없습니다."
-            retryButton.visibility = View.GONE
-            return
-        }
         if (!running.compareAndSet(false, true)) return
         val pairing = pairingSettings() ?: run {
             running.set(false)
@@ -302,11 +331,48 @@ class MainActivity : Activity() {
         progressBar.progress = 0
         executor.execute {
             try {
-                uploadToCloud(
-                    acquired,
-                    pairing.first,
-                    pairing.second,
-                    "Acquisition: PASS (cached file reused)\nFile size: ${formatBytes(acquired.file.length())}\n",
+                when (retryStage) {
+                    RetryStage.SONG_UPLOAD -> {
+                        val acquired = pendingUpload
+                        val backgroundUrl = pendingBackgroundUrl
+                        if (acquired == null || !acquired.file.isFile || backgroundUrl.isNullOrBlank()) {
+                            error("재시도할 song acquisition 파일이 없습니다.")
+                        }
+                        uploadSongAndContinue(
+                            acquired,
+                            backgroundUrl,
+                            pairing.first,
+                            pairing.second,
+                            latestReport,
+                            File(cacheDir, "youtube-acquisition-smoke"),
+                        )
+                    }
+                    RetryStage.BACKGROUND_ACQUISITION -> {
+                        val projectId = createdProjectId ?: error("재시도할 Cloud project ID가 없습니다.")
+                        val backgroundUrl = pendingBackgroundUrl ?: error("재시도할 background URL이 없습니다.")
+                        acquireAndUploadBackground(
+                            projectId,
+                            backgroundUrl,
+                            pairing.first,
+                            pairing.second,
+                            latestReport,
+                            File(cacheDir, "youtube-acquisition-smoke"),
+                        )
+                    }
+                    RetryStage.BACKGROUND_UPLOAD -> {
+                        val pending = pendingBackgroundUpload
+                        if (pending == null || !pending.file.isFile) {
+                            error("재시도할 background acquisition 파일이 없습니다.")
+                        }
+                        uploadBackground(pending, pairing.first, pairing.second, latestReport)
+                    }
+                    null -> error("재시도할 단계가 없습니다.")
+                }
+            } catch (error: Throwable) {
+                ui(
+                    status = "재시도 실패",
+                    retryVisible = true,
+                    details = latestReport + "\nRetry error: " + (error.message ?: error.javaClass.name),
                 )
             } finally {
                 running.set(false)
@@ -318,39 +384,164 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun uploadToCloud(
+    private fun uploadSongAndContinue(
         acquired: PendingCloudUpload,
+        backgroundUrl: String,
         cloudUrl: String,
         token: String,
         acquisitionReport: String,
+        workDir: File,
     ) {
-        ui(status = "Acquisition: PASS · Cloud 업로드 중", details = acquisitionReport, progress = 0)
+        ui(status = "Song acquisition: PASS · Song upload 중", details = acquisitionReport, progress = 0)
         try {
             val uploaded = uploadClient.upload(cloudUrl, token, acquired) { progress ->
-                ui(status = "Acquisition: PASS · Upload $progress%", progress = progress)
+                ui(status = "Song acquisition: PASS · Song upload $progress%", progress = progress)
             }
-            ui(
-                status = "Acquisition: PASS · Upload: PASS",
-                progress = 100,
-                retryVisible = false,
-                details = buildString {
-                    append(acquisitionReport)
-                    appendLine("Upload: PASS")
-                    appendLine("Uploaded bytes: ${uploaded.uploadedBytes}")
-                    appendLine("Project ID: ${uploaded.projectId}")
-                    appendLine("Cloud response: ${uploaded.responseBody}")
-                },
+            createdProjectId = uploaded.projectId
+            retryStage = null
+            val songReport = buildString {
+                append(acquisitionReport)
+                appendLine("Song upload: PASS")
+                appendLine("Song uploaded bytes: ${uploaded.uploadedBytes}")
+                appendLine("Project ID: ${uploaded.projectId}")
+            }
+            latestReport = songReport
+            acquireAndUploadBackground(
+                uploaded.projectId,
+                backgroundUrl,
+                cloudUrl,
+                token,
+                songReport,
+                workDir,
             )
         } catch (error: CloudBridgeException) {
+            retryStage = RetryStage.SONG_UPLOAD
             ui(
-                status = "Acquisition: PASS · Upload: FAIL",
+                status = "Song acquisition: PASS · Song upload: FAIL",
                 retryVisible = true,
                 details = buildString {
                     append(acquisitionReport)
-                    appendLine("Upload: FAIL")
+                    appendLine("Song upload: FAIL")
                     appendLine("Failure type: ${error.category}")
                     appendLine("Error: ${error.message}")
-                    appendLine("다운로드한 cache 파일은 유지됐습니다. Cloud 업로드 다시 시도를 누를 수 있습니다.")
+                    appendLine("다운로드한 song cache 파일은 유지됐습니다.")
+                },
+            )
+        }
+    }
+
+    private fun acquireAndUploadBackground(
+        projectId: String,
+        backgroundUrl: String,
+        cloudUrl: String,
+        token: String,
+        songReport: String,
+        workDir: File,
+    ) {
+        try {
+            ui(status = "Song upload: PASS · Background metadata 요청 중", details = songReport, progress = 0)
+            val info = YoutubeDL.getInstance().getInfo(backgroundUrl)
+            val backgroundDirectory = File(workDir, "background")
+            recreateDirectory(backgroundDirectory)
+            val outputTemplate = File(backgroundDirectory, "%(id)s.%(ext)s").absolutePath
+            val request = YoutubeDLRequest(backgroundUrl).apply {
+                addOption("--no-playlist")
+                addOption("--no-mtime")
+                addOption("--no-part")
+                addOption("--restrict-filenames")
+                addOption("--format", BACKGROUND_FORMAT_SELECTOR)
+                addOption("--output", outputTemplate)
+            }
+            ui(status = "Background 단일 video stream 다운로드 중", details = songReport)
+            val response = YoutubeDL.getInstance().execute(
+                request,
+                "background-acquisition-${System.currentTimeMillis()}",
+            ) { progress, eta, _ ->
+                ui(
+                    status = "Background 다운로드 ${"%.1f".format(Locale.US, progress)}% · ETA ${eta}s",
+                    progress = progress.toInt().coerceIn(0, 100),
+                )
+            }
+            val mediaFile = backgroundDirectory.listFiles()
+                ?.filter { it.isFile && it.length() > 0L && !it.name.endsWith(".part") }
+                ?.maxByOrNull { it.length() }
+                ?: error("yt-dlp exited successfully but no background media exists in cacheDir")
+            val media = inspectMedia(mediaFile)
+            if (!media.hasVideo.equals("yes", ignoreCase = true) && media.hasVideo != "1") {
+                error("Android validation found no video track in background media")
+            }
+            val backgroundReport = buildString {
+                append(songReport)
+                appendLine("Background metadata: PASS")
+                appendLine("Background title: ${info.title ?: "(unknown)"}")
+                appendLine("Background acquisition: PASS")
+                appendLine("Background exit code: ${response.exitCode}")
+                appendLine("Background file: ${mediaFile.name}")
+                appendLine("Background size: ${formatBytes(mediaFile.length())}")
+                appendLine("Background duration: ${media.durationMs} ms")
+                appendLine("Background has video: ${media.hasVideo}")
+            }
+            val pending = PendingBackgroundUpload(
+                file = mediaFile,
+                youtubeUrl = backgroundUrl,
+                projectId = projectId,
+            )
+            pendingBackgroundUpload = pending
+            latestReport = backgroundReport
+            retryStage = null
+            uploadBackground(pending, cloudUrl, token, backgroundReport)
+        } catch (error: Throwable) {
+            retryStage = RetryStage.BACKGROUND_ACQUISITION
+            ui(
+                status = "Song upload: PASS · Background acquisition: FAIL",
+                retryVisible = true,
+                details = buildString {
+                    append(songReport)
+                    appendLine("Background acquisition: FAIL")
+                    appendLine("Project ID: $projectId")
+                    appendLine("Error: ${error.message ?: error.javaClass.name}")
+                    appendLine("Song project와 song cache는 유지됐습니다.")
+                },
+            )
+        }
+    }
+
+    private fun uploadBackground(
+        pending: PendingBackgroundUpload,
+        cloudUrl: String,
+        token: String,
+        backgroundReport: String,
+    ) {
+        try {
+            ui(status = "Background acquisition: PASS · Background upload 중", details = backgroundReport, progress = 0)
+            val uploaded = uploadClient.uploadBackground(cloudUrl, token, pending) { progress ->
+                ui(status = "Background acquisition: PASS · Background upload $progress%", progress = progress)
+            }
+            retryStage = null
+            ui(
+                status = "Song: PASS · Background: PASS",
+                progress = 100,
+                retryVisible = false,
+                details = buildString {
+                    append(backgroundReport)
+                    appendLine("Background upload: PASS")
+                    appendLine("Background uploaded bytes: ${uploaded.uploadedBytes}")
+                    appendLine("Background Cloud duration: ${uploaded.durationMs} ms")
+                    appendLine("Project ID: ${uploaded.projectId}")
+                },
+            )
+        } catch (error: CloudBridgeException) {
+            retryStage = RetryStage.BACKGROUND_UPLOAD
+            ui(
+                status = "Background acquisition: PASS · Background upload: FAIL",
+                retryVisible = true,
+                details = buildString {
+                    append(backgroundReport)
+                    appendLine("Background upload: FAIL")
+                    appendLine("Project ID: ${pending.projectId}")
+                    appendLine("Failure type: ${error.category}")
+                    appendLine("Error: ${error.message}")
+                    appendLine("Background cache와 기존 Cloud project는 유지됐습니다.")
                 },
             )
         }
@@ -461,7 +652,16 @@ class MainActivity : Activity() {
         val hasAudio: String?,
     )
 
+    private enum class RetryStage {
+        SONG_UPLOAD,
+        BACKGROUND_ACQUISITION,
+        BACKGROUND_UPLOAD,
+    }
+
     companion object {
         private val HTTPS_URL = Regex("https://[^\\s]+", RegexOption.IGNORE_CASE)
+        internal const val BACKGROUND_FORMAT_SELECTOR =
+            "bestvideo[height<=1080][vcodec^=avc1]/best[height<=1080][vcodec^=avc1]/" +
+                "bestvideo[height<=1080]/best[height<=1080]"
     }
 }
