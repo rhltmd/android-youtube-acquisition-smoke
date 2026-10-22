@@ -3,7 +3,7 @@ name: Build debug APK
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, codex/mobile-end-to-end]
 
 permissions:
   contents: read

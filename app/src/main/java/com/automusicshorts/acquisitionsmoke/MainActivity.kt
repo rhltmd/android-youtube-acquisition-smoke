@@ -76,7 +76,7 @@ class MainActivity : Activity() {
         }
 
         content.addView(TextView(this).apply {
-            text = "Android YouTube Acquisition Smoke"
+            text = "Music Shorts ${BuildConfig.VERSION_NAME}\n${BuildConfig.BUILD_COMMIT}"
             textSize = 22f
             setTypeface(typeface, Typeface.BOLD)
         })
@@ -87,7 +87,7 @@ class MainActivity : Activity() {
         })
 
         cloudUrlInput = EditText(this).apply {
-            hint = "Cloud URL (https://...-8765.app.github.dev)"
+            hint = "Cloud URL (https://...)"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
             maxLines = 2
         }
@@ -130,6 +130,18 @@ class MainActivity : Activity() {
             setOnClickListener { retryUpload() }
         }
         content.addView(retryButton, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+
+        content.addView(Button(this).apply {
+            text = "최근 Cloud 작업 이어보기"
+            setOnClickListener {
+                val saved = getSharedPreferences("mobile-job", MODE_PRIVATE).getString("project_id", null)
+                val pairing = pairingSettings()
+                if (saved != null && pairing != null) {
+                    pairingStore.save(pairing.first, pairing.second)
+                    openCloudJob(saved)
+                }
+            }
+        })
 
         progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
             max = 100
@@ -530,6 +542,9 @@ class MainActivity : Activity() {
                     appendLine("Project ID: ${uploaded.projectId}")
                 },
             )
+            getSharedPreferences("mobile-job", MODE_PRIVATE).edit()
+                .putString("project_id", uploaded.projectId).commit()
+            runOnUiThread { openCloudJob(uploaded.projectId) }
         } catch (error: CloudBridgeException) {
             retryStage = RetryStage.BACKGROUND_UPLOAD
             ui(
@@ -545,6 +560,10 @@ class MainActivity : Activity() {
                 },
             )
         }
+    }
+
+    private fun openCloudJob(projectId: String) {
+        startActivity(Intent(this, MobileJobActivity::class.java).putExtra("project_id", projectId))
     }
 
     private fun pairingSettings(): Pair<String, String>? {

@@ -11,8 +11,9 @@ android {
         applicationId = "com.automusicshorts.acquisitionsmoke.audio"
         minSdk = 24
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0-smoke"
+        versionCode = 2
+        versionName = "0.2.0-mobile-jobs"
+        buildConfigField("String", "BUILD_COMMIT", "\"${System.getenv("GITHUB_SHA")?.take(12) ?: "local"}\"")
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -28,6 +29,8 @@ android {
             )
         }
     }
+
+    buildFeatures { buildConfig = true }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
