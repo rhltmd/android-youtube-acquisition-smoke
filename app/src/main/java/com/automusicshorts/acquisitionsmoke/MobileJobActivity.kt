@@ -11,8 +11,10 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
+import android.text.InputType
 import android.view.View
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -92,26 +94,92 @@ class MobileJobActivity : Activity() {
 
     private fun loadReview() = runTask {
         val data = client.request(projectId, "review")
+        showReview(data)
+    }
+
+    private fun showReview(data: JSONObject) {
         val lines = data.getJSONArray("lines")
-        val text = buildString {
-            for (index in 0 until lines.length()) {
-                val line = lines.getJSONObject(index)
-                append("${line.opt("start_ms")}–${line.opt("end_ms")} ms\n")
-                append("${line.optString("japanese")}\n${line.optString("korean")}\n\n")
-            }
-        }
         runOnUiThread {
             if (isDestroyed) return@runOnUiThread
-            val view = TextView(this).apply { this.text = text; setPadding(24, 16, 24, 16); setTextIsSelectable(true) }
-            AlertDialog.Builder(this).setTitle("최종 가사·번역·타이밍 검토")
-                .setView(ScrollView(this).apply { addView(view) })
+            val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 16, 24, 16) }
+            content.addView(TextView(this).apply { text = "수정할 줄을 누르세요. 저장 후 다시 검토해야 렌더를 시작합니다." })
+            lateinit var dialog: AlertDialog
+            var complete = lines.length() > 0
+            for (index in 0 until lines.length()) {
+                val line = lines.getJSONObject(index)
+                val japanese = lineText(line, "japanese")
+                val korean = lineText(line, "korean")
+                if (korean.isBlank() || runCatching {
+                    reviewEditTimes(japanese, korean, lineText(line, "start_ms"), lineText(line, "end_ms"))
+                }.isFailure) complete = false
+                content.addView(Button(this).apply {
+                    isAllCaps = false
+                    text = "${index + 1}. ${lineText(line, "start_ms")}–${lineText(line, "end_ms")} ms\n$japanese\n$korean"
+                    setOnClickListener { dialog.dismiss(); editReviewLine(data.getString("revision"), line) }
+                })
+            }
+            dialog = AlertDialog.Builder(this).setTitle("최종 가사·번역·타이밍 검토")
+                .setView(ScrollView(this).apply { addView(content) })
                 .setNegativeButton("돌아가기", null)
                 .setPositiveButton("확인 완료 · 렌더 시작") { _, _ ->
                     runTask {
                         val approved = JSONObject().put("approved", true).put("revision", data.getString("revision"))
                         showState(client.request(projectId, "review", approved))
                     }
-                }.show()
+                }.create()
+            dialog.show()
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).isEnabled = complete
+        }
+    }
+
+    private fun lineText(line: JSONObject, key: String): String =
+        if (line.isNull(key)) "" else line.optString(key)
+
+    private fun editReviewLine(revision: String, line: JSONObject) {
+        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 16, 24, 16) }
+        fun field(label: String, key: String, numeric: Boolean = false): EditText {
+            content.addView(TextView(this).apply { text = label })
+            return EditText(this).apply {
+                inputType = if (numeric) InputType.TYPE_CLASS_NUMBER else
+                    InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                setText(lineText(line, key))
+                content.addView(this)
+            }
+        }
+        val japanese = field("일본어 원문", "japanese")
+        val korean = field("한국어 자막", "korean")
+        val start = field("시작 (ms)", "start_ms", true)
+        val end = field("종료 (ms)", "end_ms", true)
+        val errorView = TextView(this)
+        content.addView(errorView)
+        val dialog = AlertDialog.Builder(this).setTitle("가사 한 줄 수정")
+            .setView(ScrollView(this).apply { addView(content) })
+            .setNegativeButton("취소", null).setPositiveButton("저장 후 다시 검토", null).create()
+        dialog.show()
+        val save = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+        save.setOnClickListener {
+            val original = japanese.text.toString()
+            val translated = korean.text.toString()
+            val times = try { reviewEditTimes(original, translated, start.text.toString(), end.text.toString()) }
+                catch (error: IllegalArgumentException) { errorView.text = error.message; return@setOnClickListener }
+            if (busy.get()) { errorView.text = "현재 요청이 끝난 후 저장해주세요."; return@setOnClickListener }
+            save.isEnabled = false
+            val body = JSONObject().put("revision", revision).put("line_id", line.getString("line_id"))
+                .put("japanese", original).put("korean", translated).put("start_ms", times.first).put("end_ms", times.second)
+            runTask {
+                try {
+                    val updated = client.request(projectId, "review-line", body)
+                    runOnUiThread { if (!isDestroyed) { dialog.dismiss(); showReview(updated) } }
+                } catch (error: Exception) {
+                    runOnUiThread {
+                        if (!isDestroyed) {
+                            save.isEnabled = true
+                            errorView.text = "저장되지 않았습니다. 입력은 유지됩니다. 충돌이면 최신 가사를 다시 열어주세요.\n" +
+                                (if (error is CloudBridgeException) error.message else error.javaClass.simpleName)
+                        }
+                    }
+                }
+            }
         }
     }
 

@@ -8,12 +8,22 @@ import java.net.URL
 
 internal fun mobileJobEndpoint(base: String, projectId: String, action: String): URL {
     require(Regex("[0-9a-f]{32}").matches(projectId)) { "Invalid project ID" }
-    require(action in setOf("start", "status", "review", "download")) { "Invalid job action" }
+    require(action in setOf("start", "status", "review", "review-line", "download")) { "Invalid job action" }
     val uri = URI(base.trim().trimEnd('/'))
     require(uri.scheme.equals("https", true) && !uri.host.isNullOrBlank() &&
         uri.rawUserInfo == null && uri.rawQuery == null && uri.rawFragment == null &&
         uri.path.orEmpty().isEmpty()) { "Cloud URL must be an HTTPS server address" }
     return URL("$uri/mobile-projects/$projectId/$action")
+}
+
+internal fun reviewEditTimes(japanese: String, korean: String, start: String, end: String): Pair<Int, Int> {
+    require(japanese.length <= 2000 && korean.length <= 2000) { "한 줄은 2,000자 이하로 입력해주세요." }
+    val startMs = start.trim().toIntOrNull()
+    val endMs = end.trim().toIntOrNull()
+    require(startMs != null && endMs != null && startMs >= 0 && endMs > startMs) {
+        "시작/종료를 밀리초 정수로 입력해주세요. 종료는 시작보다 뒤여야 합니다."
+    }
+    return startMs to endMs
 }
 
 internal class MobileJobClient(

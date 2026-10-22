@@ -94,10 +94,23 @@ class MobileJobClientTest {
 
     @Test fun projectRoutesUseHttpsAndServerRoot() {
         val id = "a".repeat(32)
-        for (action in listOf("start", "status", "review", "download")) {
+        for (action in listOf("start", "status", "review", "review-line", "download")) {
             assertEquals("https://example.trycloudflare.com/mobile-projects/$id/$action",
                 mobileJobEndpoint(" https://example.trycloudflare.com/ ", id, action).toString())
         }
+    }
+
+    @Test fun explicitReviewEditsAcceptValidMillisecondRange() {
+        assertEquals(100 to 900, reviewEditTimes("修正", "수정", " 100 ", "900"))
+        assertEquals(0 to 900, reviewEditTimes("", "", "0", "900"))
+    }
+
+    @Test fun invalidReviewEditsAreRejectedBeforeNetworkRequest() {
+        for (range in listOf("" to "900", "-1" to "900", "900" to "900", "901" to "900",
+                             "0.5" to "900", "0" to "999999999999")) {
+            assertThrows(IllegalArgumentException::class.java) { reviewEditTimes("a", "b", range.first, range.second) }
+        }
+        assertThrows(IllegalArgumentException::class.java) { reviewEditTimes("x".repeat(2001), "b", "0", "900") }
     }
 
     @Test fun credentialsQueriesPathsAndInvalidIdsAreRejected() {
