@@ -16,9 +16,13 @@ internal fun mobileJobEndpoint(base: String, projectId: String, action: String):
     return URL("$uri/mobile-projects/$projectId/$action")
 }
 
-internal class MobileJobClient(private val base: String, private val token: String) {
+internal class MobileJobClient(
+    private val base: String,
+    private val token: String,
+    private val openConnection: (URL) -> HttpURLConnection = { it.openConnection() as HttpURLConnection },
+) {
     private fun connection(projectId: String, action: String, method: String): HttpURLConnection =
-        (mobileJobEndpoint(base, projectId, action).openConnection() as HttpURLConnection).apply {
+        openConnection(mobileJobEndpoint(base, projectId, action)).apply {
             requestMethod = method
             connectTimeout = 15_000
             readTimeout = 30_000
@@ -59,7 +63,7 @@ internal class MobileJobClient(private val base: String, private val token: Stri
             if (status != 200) throw CloudBridgeException(classifyHttpStatus(status), "Download HTTP $status")
             require(conn.contentType?.substringBefore(';') == "video/mp4") { "Unexpected download type" }
             val expected = conn.getHeaderFieldLong("Content-Length", -1)
-            require(expected > 0 && expected + 16L * 1024 * 1024 < directory.usableSpace) {
+            require(expected > 0 && expected < directory.usableSpace - 16L * 1024 * 1024) {
                 "영상 크기를 확인할 수 없거나 저장 공간이 부족합니다."
             }
             conn.inputStream.buffered().use { input ->
