@@ -5,6 +5,7 @@ import java.io.FileOutputStream
 import java.io.ByteArrayOutputStream
 import java.net.URI
 import java.util.Properties
+import java.util.UUID
 
 internal data class AcquisitionRecovery(
     val stage: String,
@@ -34,9 +35,11 @@ internal class AcquisitionRecoveryStore(private val file: File, private val cach
             state.song?.let {
                 requireYoutubeUrl(it.youtubeUrl)
                 require(it.durationMs > 0)
+                require(Regex("[0-9a-f]{32}").matches(it.requestId))
                 setProperty("songUrl", it.youtubeUrl)
                 setProperty("songName", it.projectName.take(80))
                 setProperty("songDuration", it.durationMs.toString())
+                setProperty("songRequestId", it.requestId)
                 if (it.file.isFile) putFile(this, "song", it.file)
             }
             state.background?.let { if (it.file.isFile) putFile(this, "background", it.file) }
@@ -67,7 +70,10 @@ internal class AcquisitionRecoveryStore(private val file: File, private val cach
             val url = values.getProperty("songUrl").also { requireYoutubeUrl(it) }
             val duration = values.getProperty("songDuration")?.toLongOrNull()
             require(duration != null && duration > 0)
-            PendingCloudUpload(it, url, values.getProperty("songName", "Android YouTube upload").take(80), duration)
+            // Earlier development checkpoints had no request ID. Retry saves this upgrade before HTTP.
+            val requestId = values.getProperty("songRequestId") ?: UUID.randomUUID().toString().replace("-", "")
+            require(Regex("[0-9a-f]{32}").matches(requestId))
+            PendingCloudUpload(it, url, values.getProperty("songName", "Android YouTube upload").take(80), duration, requestId)
         }
         val background = readFile(values, "background")?.let {
             require(!projectId.isNullOrBlank())

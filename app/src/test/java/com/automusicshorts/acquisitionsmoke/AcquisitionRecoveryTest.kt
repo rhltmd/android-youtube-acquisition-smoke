@@ -39,6 +39,7 @@ class AcquisitionRecoveryTest {
         assertEquals(3000L, restored.song!!.durationMs)
         assertEquals(songUrl, restored.song!!.youtubeUrl)
         assertEquals("노래", restored.song!!.projectName)
+        assertEquals(song.requestId, restored.song!!.requestId)
         assertNull(restored.projectId)
     }
 
@@ -145,7 +146,7 @@ class AcquisitionRecoveryTest {
         val (cache, file, store) = fixture()
         store.save(AcquisitionRecovery("SONG_UPLOAD", backgroundUrl, song(cache), null, null))
         val properties = Properties().apply { file.inputStream().use { load(it) } }
-        assertEquals(setOf("version", "stage", "backgroundUrl", "songUrl", "songName", "songDuration", "songFile", "songBytes"), properties.stringPropertyNames())
+        assertEquals(setOf("version", "stage", "backgroundUrl", "songUrl", "songName", "songDuration", "songRequestId", "songFile", "songBytes"), properties.stringPropertyNames())
         assertEquals("song.webm", properties.getProperty("songFile"))
         file.writeBytes(ByteArray(16_385))
         assertThrows(IllegalArgumentException::class.java) { store.load() }
@@ -159,6 +160,18 @@ class AcquisitionRecoveryTest {
         assertFalse(file.exists())
         assertTrue(song.file.isFile)
         assertNull(store.load())
+    }
+
+    @Test fun legacyCheckpointGetsRequestIdThatIsPersistedBeforeRetry() {
+        val (cache, file, store) = fixture()
+        store.save(AcquisitionRecovery("SONG_UPLOAD", backgroundUrl, song(cache), null, null))
+        rewrite(file) { remove("songRequestId") }
+        val restored = store.load()!!
+        assertTrue(Regex("[0-9a-f]{32}").matches(restored.song!!.requestId))
+        store.save(restored)
+        assertEquals(restored.song!!.requestId, AcquisitionRecoveryStore(file, cache).load()!!.song!!.requestId)
+        rewrite(file) { setProperty("songRequestId", "../../escape") }
+        assertThrows(IllegalArgumentException::class.java) { store.load() }
     }
 
     private fun rewrite(file: File, update: Properties.() -> Unit) {

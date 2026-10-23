@@ -16,18 +16,21 @@ import java.net.URL
 import java.net.UnknownHostException
 import java.security.KeyStore
 import java.security.MessageDigest
+import java.util.UUID
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 internal const val MOBILE_UPLOAD_TOKEN_HEADER = "X-Music-Shorts-Token"
+internal const val MOBILE_SOURCE_REQUEST_ID_HEADER = "X-Music-Shorts-Request-ID"
 
 data class PendingCloudUpload(
     val file: File,
     val youtubeUrl: String,
     val projectName: String,
     val durationMs: Long,
+    val requestId: String = UUID.randomUUID().toString().replace("-", ""),
 )
 
 data class PendingBackgroundUpload(
@@ -117,23 +120,27 @@ class PairingStore(context: Context) {
     }
 }
 
-class MobileUploadClient {
+class MobileUploadClient(
+    private val openConnection: (URL) -> HttpURLConnection = { it.openConnection() as HttpURLConnection },
+) {
     fun upload(
         cloudBaseUrl: String,
         token: String,
         pending: PendingCloudUpload,
         progress: (Int) -> Unit,
     ): CloudUploadResult {
+        require(Regex("[0-9a-f]{32}").matches(pending.requestId)) { "Invalid source request ID" }
         val endpoint = mobileSourceEndpoint(cloudBaseUrl)
         val boundary = "MusicShorts-${System.currentTimeMillis()}"
         val hash = sha256(pending.file)
-        val connection = (endpoint.openConnection() as HttpURLConnection).apply {
+        val connection = openConnection(endpoint).apply {
             requestMethod = "POST"
             connectTimeout = 15_000
             readTimeout = 180_000
             doOutput = true
             setChunkedStreamingMode(64 * 1024)
             setRequestProperty(MOBILE_UPLOAD_TOKEN_HEADER, token)
+            setRequestProperty(MOBILE_SOURCE_REQUEST_ID_HEADER, pending.requestId)
             setRequestProperty("Accept", "application/json")
             setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
         }
@@ -211,7 +218,7 @@ class MobileUploadClient {
         val endpoint = mobileBackgroundEndpoint(cloudBaseUrl)
         val boundary = "MusicShortsBackground-${System.currentTimeMillis()}"
         val hash = sha256(pending.file)
-        val connection = (endpoint.openConnection() as HttpURLConnection).apply {
+        val connection = openConnection(endpoint).apply {
             requestMethod = "POST"
             connectTimeout = 15_000
             readTimeout = 180_000
