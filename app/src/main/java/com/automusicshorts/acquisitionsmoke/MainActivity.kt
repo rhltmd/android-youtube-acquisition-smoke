@@ -1,6 +1,7 @@
 package com.automusicshorts.acquisitionsmoke
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.graphics.Typeface
 import android.media.MediaMetadataRetriever
@@ -8,6 +9,8 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
@@ -26,8 +29,23 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : Activity() {
     private val executor = Executors.newSingleThreadExecutor()
-    private val running = AtomicBoolean(false)
+    private val running = processRunning
     private val uploadClient = MobileUploadClient()
+    private lateinit var recoveryStore: AcquisitionRecoveryStore
+    private val recoveryHandler = Handler(Looper.getMainLooper())
+    private var waitingForPreviousActivity = false
+    private val recoverWhenIdle = object : Runnable {
+        override fun run() {
+            if (isDestroyed) return
+            if (running.get()) recoveryHandler.postDelayed(this, 1000)
+            else {
+                waitingForPreviousActivity = false
+                startButton.isEnabled = true
+                statusText.text = "기존 요청이 종료되었습니다. 저장된 결과를 확인합니다."
+                restoreRecovery()
+            }
+        }
+    }
 
     private lateinit var pairingStore: PairingStore
     private lateinit var cloudUrlInput: EditText
@@ -49,11 +67,25 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         pairingStore = PairingStore(this)
+        recoveryStore = AcquisitionRecoveryStore(File(filesDir, "acquisition-recovery.properties"),
+            File(cacheDir, "youtube-acquisition-smoke"))
         setContentView(buildUi())
         cloudUrlInput.setText(pairingStore.cloudUrl())
         tokenInput.setText(pairingStore.token())
+        waitingForPreviousActivity = running.get()
+        if (waitingForPreviousActivity) {
+            startButton.isEnabled = false
+            statusText.text = "기존 요청 처리 중 · 완료 후 저장된 상태를 복구합니다."
+        } else restoreRecovery()
         acceptSharedUrl(intent)
     }
+
+    override fun onResume() {
+        super.onResume()
+        if (waitingForPreviousActivity) recoveryHandler.post(recoverWhenIdle)
+    }
+
+    override fun onPause() { recoveryHandler.removeCallbacks(recoverWhenIdle); super.onPause() }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
@@ -62,7 +94,8 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
-        executor.shutdownNow()
+        recoveryHandler.removeCallbacksAndMessages(null)
+        executor.shutdown() // Activity recreation must not start a competing acquisition.
         super.onDestroy()
     }
 
@@ -120,7 +153,13 @@ class MainActivity : Activity() {
 
         startButton = Button(this).apply {
             text = "다운로드 및 Cloud 프로젝트 생성"
-            setOnClickListener { startSmoke() }
+            setOnClickListener {
+                if (retryStage == null) startSmoke()
+                else AlertDialog.Builder(this@MainActivity).setTitle("새 작업을 시작할까요?")
+                    .setMessage("현재 파일은 다시 다운로드하지 않고 재시도할 수 있습니다. 새 작업은 기존 재시도 cache를 교체합니다.")
+                    .setNegativeButton("기존 작업 유지", null)
+                    .setPositiveButton("새 작업") { _, _ -> startSmoke() }.show()
+            }
         }
         content.addView(startButton, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
 
@@ -218,6 +257,7 @@ class MainActivity : Activity() {
         executor.execute {
             val workDir = File(cacheDir, "youtube-acquisition-smoke")
             try {
+                recoveryStore.clear()
                 recreateDirectory(workDir)
                 YoutubeDL.getInstance().init(applicationContext)
 
@@ -261,6 +301,7 @@ class MainActivity : Activity() {
                 val processId = "acquisition-smoke-${System.currentTimeMillis()}"
                 val response = YoutubeDL.getInstance().execute(request, processId) { progress, eta, line ->
                     runOnUiThread {
+                        if (isDestroyed) return@runOnUiThread
                         progressBar.progress = progress.toInt().coerceIn(0, 100)
                         statusText.text = "다운로드 ${"%.1f".format(Locale.US, progress)}% · ETA ${eta}s"
                         if (line.contains("ERROR", ignoreCase = true)) {
@@ -298,6 +339,8 @@ class MainActivity : Activity() {
                 )
                 pendingUpload = acquired
                 latestReport = acquisitionReport
+                retryStage = RetryStage.SONG_UPLOAD
+                saveRecovery("SONG_UPLOAD")
                 uploadSongAndContinue(
                     acquired,
                     backgroundUrl,
@@ -313,7 +356,8 @@ class MainActivity : Activity() {
                     .joinToString("\nCaused by: ")
                     .ifBlank { error.javaClass.name }
                 ui(
-                    status = "Acquisition: FAIL",
+                    status = if (pendingUpload == null) "Acquisition: FAIL" else "처리 중단 · 저장된 파일은 유지됩니다.",
+                    retryVisible = retryStage != null,
                     details = buildString {
                         appendLine("Network: ${networkLabel()}")
                         appendLine("Failure type: ${classifyFailure(message)}")
@@ -324,6 +368,7 @@ class MainActivity : Activity() {
             } finally {
                 running.set(false)
                 runOnUiThread {
+                    if (isDestroyed) return@runOnUiThread
                     startButton.isEnabled = true
                     progressBar.visibility = View.VISIBLE
                 }
@@ -343,6 +388,8 @@ class MainActivity : Activity() {
         progressBar.progress = 0
         executor.execute {
             try {
+                // Persist the current boundary before a network retry, including recovery from disk errors.
+                saveRecovery(retryStage?.name ?: error("재시도할 단계가 없습니다."))
                 when (retryStage) {
                     RetryStage.SONG_UPLOAD -> {
                         val acquired = pendingUpload
@@ -350,6 +397,8 @@ class MainActivity : Activity() {
                         if (acquired == null || !acquired.file.isFile || backgroundUrl.isNullOrBlank()) {
                             error("재시도할 song acquisition 파일이 없습니다.")
                         }
+                        val media = inspectMedia(acquired.file)
+                        check(media.hasAudio.equals("yes", true) || media.hasAudio == "1") { "Song audio track missing" }
                         uploadSongAndContinue(
                             acquired,
                             backgroundUrl,
@@ -376,6 +425,8 @@ class MainActivity : Activity() {
                         if (pending == null || !pending.file.isFile) {
                             error("재시도할 background acquisition 파일이 없습니다.")
                         }
+                        val media = inspectMedia(pending.file)
+                        check(media.hasVideo.equals("yes", true) || media.hasVideo == "1") { "Background video track missing" }
                         uploadBackground(pending, pairing.first, pairing.second, latestReport)
                     }
                     null -> error("재시도할 단계가 없습니다.")
@@ -389,6 +440,7 @@ class MainActivity : Activity() {
             } finally {
                 running.set(false)
                 runOnUiThread {
+                    if (isDestroyed) return@runOnUiThread
                     startButton.isEnabled = true
                     retryButton.isEnabled = true
                 }
@@ -410,6 +462,8 @@ class MainActivity : Activity() {
                 ui(status = "Song acquisition: PASS · Song upload $progress%", progress = progress)
             }
             createdProjectId = uploaded.projectId
+            retryStage = RetryStage.BACKGROUND_ACQUISITION
+            saveRecovery("BACKGROUND_ACQUISITION")
             retryStage = null
             val songReport = buildString {
                 append(acquisitionReport)
@@ -451,6 +505,7 @@ class MainActivity : Activity() {
         workDir: File,
     ) {
         try {
+            YoutubeDL.getInstance().init(applicationContext)
             ui(status = "Song upload: PASS · Background metadata 요청 중", details = songReport, progress = 0)
             val info = YoutubeDL.getInstance().getInfo(backgroundUrl)
             val backgroundDirectory = File(workDir, "background")
@@ -500,12 +555,15 @@ class MainActivity : Activity() {
             )
             pendingBackgroundUpload = pending
             latestReport = backgroundReport
+            retryStage = RetryStage.BACKGROUND_UPLOAD
+            saveRecovery("BACKGROUND_UPLOAD")
             retryStage = null
             uploadBackground(pending, cloudUrl, token, backgroundReport)
         } catch (error: Throwable) {
-            retryStage = RetryStage.BACKGROUND_ACQUISITION
+            retryStage = if (pendingBackgroundUpload?.file?.isFile == true) RetryStage.BACKGROUND_UPLOAD
+                else RetryStage.BACKGROUND_ACQUISITION
             ui(
-                status = "Song upload: PASS · Background acquisition: FAIL",
+                status = "Song upload: PASS · Background 처리 중단",
                 retryVisible = true,
                 details = buildString {
                     append(songReport)
@@ -529,6 +587,7 @@ class MainActivity : Activity() {
             val uploaded = uploadClient.uploadBackground(cloudUrl, token, pending) { progress ->
                 ui(status = "Background acquisition: PASS · Background upload $progress%", progress = progress)
             }
+            saveRecovery("COMPLETE")
             retryStage = null
             ui(
                 status = "Song: PASS · Background: PASS",
@@ -544,7 +603,7 @@ class MainActivity : Activity() {
             )
             getSharedPreferences("mobile-job", MODE_PRIVATE).edit()
                 .putString("project_id", uploaded.projectId).commit()
-            runOnUiThread { openCloudJob(uploaded.projectId) }
+            runOnUiThread { if (!isDestroyed) openCloudJob(uploaded.projectId) }
         } catch (error: CloudBridgeException) {
             retryStage = RetryStage.BACKGROUND_UPLOAD
             ui(
@@ -564,6 +623,33 @@ class MainActivity : Activity() {
 
     private fun openCloudJob(projectId: String) {
         startActivity(Intent(this, MobileJobActivity::class.java).putExtra("project_id", projectId))
+    }
+
+    private fun saveRecovery(stage: String) {
+        recoveryStore.save(AcquisitionRecovery(stage, pendingBackgroundUrl ?: error("Background URL missing"),
+            pendingUpload, createdProjectId, pendingBackgroundUpload))
+    }
+
+    private fun restoreRecovery() {
+        try {
+            val state = recoveryStore.load() ?: return
+            pendingUpload = state.song
+            pendingBackgroundUpload = state.background
+            pendingBackgroundUrl = state.backgroundUrl
+            createdProjectId = state.projectId
+            state.song?.let { urlInput.setText(it.youtubeUrl) }
+            backgroundUrlInput.setText(state.backgroundUrl)
+            retryStage = if (state.stage == "COMPLETE") null else RetryStage.valueOf(state.stage)
+            retryButton.visibility = if (retryStage == null) View.GONE else View.VISIBLE
+            latestReport = "저장된 단계: ${state.stage}\n" + (state.projectId?.let { "Project ID: $it\n" } ?: "")
+            resultText.text = latestReport
+            statusText.text = if (retryStage == null) "업로드 완료 · 최근 Cloud 작업 이어보기를 눌러주세요."
+                else "저장된 작업 복구 · 실패 단계 다시 시도로 이어갈 수 있습니다."
+            if (state.stage == "COMPLETE") getSharedPreferences("mobile-job", MODE_PRIVATE).edit()
+                .putString("project_id", state.projectId).commit()
+        } catch (_: Exception) {
+            statusText.text = "저장된 cache가 없거나 변경되어 복구할 수 없습니다. 기존 Cloud 프로젝트는 삭제되지 않았습니다."
+        }
     }
 
     private fun pairingSettings(): Pair<String, String>? {
@@ -647,6 +733,7 @@ class MainActivity : Activity() {
         retryVisible: Boolean? = null,
     ) {
         runOnUiThread {
+            if (isDestroyed) return@runOnUiThread
             statusText.text = status
             details?.let { resultText.text = it }
             progress?.let { progressBar.progress = it.coerceIn(0, 100) }
@@ -678,6 +765,7 @@ class MainActivity : Activity() {
     }
 
     companion object {
+        private val processRunning = AtomicBoolean(false)
         private val HTTPS_URL = Regex("https://[^\\s]+", RegexOption.IGNORE_CASE)
         internal const val BACKGROUND_FORMAT_SELECTOR =
             "bestvideo[height<=1080][vcodec^=avc1]/best[height<=1080][vcodec^=avc1]/" +
