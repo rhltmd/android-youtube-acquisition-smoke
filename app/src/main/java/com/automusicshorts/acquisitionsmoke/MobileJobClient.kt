@@ -8,7 +8,7 @@ import java.net.URL
 
 internal fun mobileJobEndpoint(base: String, projectId: String, action: String): URL {
     require(Regex("[0-9a-f]{32}").matches(projectId)) { "Invalid project ID" }
-    require(action in setOf("start", "status", "review", "review-line", "download")) { "Invalid job action" }
+    require(action in setOf("start", "status", "review", "review-line", "retry", "download")) { "Invalid job action" }
     val uri = URI(base.trim().trimEnd('/'))
     require(uri.scheme.equals("https", true) && !uri.host.isNullOrBlank() &&
         uri.rawUserInfo == null && uri.rawQuery == null && uri.rawFragment == null &&
@@ -25,6 +25,10 @@ internal fun reviewEditTimes(japanese: String, korean: String, start: String, en
     }
     return startMs to endMs
 }
+
+internal fun mobileRetryAllowed(status: String, stage: String, serverAllows: Boolean): Boolean =
+    serverAllows && status in setOf("needs_attention", "interrupted") &&
+        stage in setOf("audio", "asr", "correction", "translation")
 
 internal class MobileJobClient(
     private val base: String,

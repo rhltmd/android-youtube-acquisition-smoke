@@ -94,9 +94,24 @@ class MobileJobClientTest {
 
     @Test fun projectRoutesUseHttpsAndServerRoot() {
         val id = "a".repeat(32)
-        for (action in listOf("start", "status", "review", "review-line", "download")) {
+        for (action in listOf("start", "status", "review", "review-line", "retry", "download")) {
             assertEquals("https://example.trycloudflare.com/mobile-projects/$id/$action",
                 mobileJobEndpoint(" https://example.trycloudflare.com/ ", id, action).toString())
+        }
+    }
+
+    @Test fun processingRetryIsOnlyOfferedForServerApprovedIncompleteStages() {
+        for (status in listOf("needs_attention", "interrupted")) {
+            for (stage in listOf("audio", "asr", "correction", "translation")) {
+                assertTrue(mobileRetryAllowed(status, stage, true))
+                assertFalse(mobileRetryAllowed(status, stage, false))
+            }
+        }
+        for (stage in listOf("render", "review", "timing", "complete")) {
+            assertFalse(mobileRetryAllowed("needs_attention", stage, true))
+        }
+        for (status in listOf("running", "idle", "completed", "needs_review")) {
+            assertFalse(mobileRetryAllowed(status, "asr", true))
         }
     }
 

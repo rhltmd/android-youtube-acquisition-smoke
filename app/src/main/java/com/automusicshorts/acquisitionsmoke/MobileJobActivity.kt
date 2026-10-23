@@ -33,6 +33,8 @@ class MobileJobActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var review: Button
     private lateinit var download: Button
+    private lateinit var retryProcessing: Button
+    private var retryRevision: String? = null
     private var visible = false
     private var pollAgain = true
     private val poll = Runnable { fetchStatus() }
@@ -50,6 +52,12 @@ class MobileJobActivity : Activity() {
         content.addView(review)
         download = Button(this).apply { text = "완성 MP4 다운로드"; visibility = View.GONE; setOnClickListener { downloadVideo() } }
         content.addView(download)
+        retryProcessing = Button(this).apply {
+            text = "중단된 처리 다시 시도"
+            visibility = View.GONE
+            setOnClickListener { confirmProcessingRetry() }
+        }
+        content.addView(retryProcessing)
         content.addView(Button(this).apply { text = "상태 다시 확인"; setOnClickListener { pollAgain = true; fetchStatus() } })
         setContentView(ScrollView(this).apply { addView(content) })
         if (savedInstanceState == null) runTask {
@@ -89,7 +97,23 @@ class MobileJobActivity : Activity() {
             if (phase == "needs_attention") status.append("\n확인이 필요합니다: ${state.optString("error")}")
             review.visibility = if (phase in setOf("needs_review", "needs_attention", "interrupted")) View.VISIBLE else View.GONE
             download.visibility = if (state.optBoolean("download_ready")) View.VISIBLE else View.GONE
+            retryRevision = if (state.isNull("retry_revision")) null else state.optString("retry_revision")
+            retryProcessing.visibility = if (mobileRetryAllowed(phase, state.optString("stage"),
+                    state.optBoolean("retry_available")) && retryRevision?.length == 64) View.VISIBLE else View.GONE
         }
+    }
+
+    private fun confirmProcessingRetry() {
+        val revision = retryRevision ?: return
+        AlertDialog.Builder(this).setTitle("실패한 처리 재시도")
+            .setMessage("완료된 단계와 저장된 가사는 유지합니다. 아직 완료되지 않은 처리를 다시 요청할까요? API 호출이 다시 발생할 수 있으며, 렌더 전 검토는 생략하지 않습니다.")
+            .setNegativeButton("취소", null)
+            .setPositiveButton("재시도") { _, _ ->
+                runTask {
+                    val body = JSONObject().put("retry", true).put("revision", revision)
+                    showState(client.request(projectId, "retry", body))
+                }
+            }.show()
     }
 
     private fun loadReview() = runTask {
