@@ -8,11 +8,11 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.automusicshorts.acquisitionsmoke.audio"
+        applicationId = "com.automusicshorts.acquisitionsmoke.audio.e2eqa"
         minSdk = 24
         targetSdk = 35
         versionCode = 2
-        versionName = "0.2.0-mobile-jobs"
+        versionName = "0.2.0-e2e-qa"
         buildConfigField("String", "BUILD_COMMIT", "\"${System.getenv("GITHUB_SHA")?.take(12) ?: "local"}\"")
 
         ndk {
