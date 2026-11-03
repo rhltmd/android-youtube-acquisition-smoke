@@ -6,6 +6,8 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.uiautomator.By
 import androidx.test.uiautomator.UiDevice
+import androidx.test.uiautomator.UiScrollable
+import androidx.test.uiautomator.UiSelector
 import androidx.test.uiautomator.Until
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
@@ -141,8 +143,9 @@ class AutomationProtocolTest {
         val activity = instrumentation.startActivitySync(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         try {
             val device = UiDevice.getInstance(instrumentation)
-            assertTrue(device.wait(Until.hasObject(By.text("다운로드 및 Cloud 프로젝트 생성")), 15000))
-            assertTrue(device.hasObject(By.text("최근 Cloud 작업 이어보기")))
+            assertTrue("start control visible", device.wait(Until.hasObject(By.text("다운로드 및 Cloud 프로젝트 생성")), 15000))
+            assertTrue("recent project control reachable", UiScrollable(UiSelector().scrollable(true))
+                .scrollIntoView(UiSelector().text("최근 Cloud 작업 이어보기")))
             evidence("apk_ui_launch", JSONObject().put("result", "PASS").put("build", BuildConfig.BUILD_COMMIT))
         } finally { instrumentation.runOnMainSync { activity.finish() } }
     }
@@ -188,6 +191,8 @@ class AutomationProtocolTest {
                     result.put("download", "NOT VERIFIED").put("failure_type", error.javaClass.simpleName)
                         .put("bot_or_signin", message.contains("not a bot", true) || message.contains("sign in", true))
                         .put("http_403", message.contains("403")).put("js_error", message.contains("javascript", true))
+                        .put("unavailable", message.contains("unavailable", true) || message.contains("private video", true))
+                        .put("format_unavailable", message.contains("Requested format", true))
                 }
                 report.put(kind, result)
             }
