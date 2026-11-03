@@ -3,15 +3,16 @@ package com.automusicshorts.acquisitionsmoke
 import android.content.Intent
 import android.content.Context
 import android.media.MediaMetadataRetriever
+import android.graphics.Rect
+import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
+import android.widget.Button
+import android.widget.EditText
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import androidx.test.uiautomator.By
 import androidx.test.uiautomator.UiDevice
-import androidx.test.uiautomator.UiScrollable
-import androidx.test.uiautomator.UiSelector
-import androidx.test.uiautomator.Until
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import org.json.JSONObject
@@ -158,12 +159,27 @@ class AutomationProtocolTest {
             }
             instrumentation.waitForIdleSync()
             result.put("screen_on", device.isScreenOn).put("foreground_package", device.currentPackageName)
-            result.put("start_reachable", UiScrollable(UiSelector().scrollable(true))
-                .scrollIntoView(UiSelector().text("다운로드 및 Cloud 프로젝트 생성")))
-            assertTrue("start control reachable", result.getBoolean("start_reachable"))
-            result.put("recent_reachable", UiScrollable(UiSelector().scrollable(true))
-                .scrollIntoView(UiSelector().text("최근 Cloud 작업 이어보기")))
-            assertTrue("recent project control reachable", result.getBoolean("recent_reachable"))
+            // API 35's accessibility tree did not expose a UiScrollable. Inspect
+            // and interact with the *actual Activity views*, not mocked widgets.
+            instrumentation.runOnMainSync {
+                val views = mutableListOf<View>()
+                fun collect(view: View) {
+                    views.add(view)
+                    if (view is ViewGroup) for (index in 0 until view.childCount) collect(view.getChildAt(index))
+                }
+                collect(activity.window.decorView)
+                val start = views.filterIsInstance<Button>().single { it.text.toString() == "다운로드 및 Cloud 프로젝트 생성" }
+                val recent = views.filterIsInstance<Button>().single { it.text.toString() == "최근 Cloud 작업 이어보기" }
+                start.requestRectangleOnScreen(Rect(0, 0, start.width, start.height), true)
+                assertTrue("actual start view visible", start.isShown && start.getGlobalVisibleRect(Rect()))
+                start.performClick() // Empty source must be rejected, not start acquisition.
+                val source = views.filterIsInstance<EditText>().single { it.hint?.toString() == "https://www.youtube.com/watch?v=..." }
+                assertFalse("actual empty-source validation", source.error.isNullOrEmpty())
+                recent.requestRectangleOnScreen(Rect(0, 0, recent.width, recent.height), true)
+                assertTrue("actual resume view visible", recent.isShown && recent.getGlobalVisibleRect(Rect()))
+                result.put("backend", "actual Android View instrumentation")
+                    .put("start_reachable", true).put("recent_reachable", true).put("empty_source_validation", "PASS")
+            }
             result.put("result", "PASS").put("build", BuildConfig.BUILD_COMMIT)
         } finally {
             evidence("apk_ui_launch", result)

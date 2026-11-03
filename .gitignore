@@ -3,3 +3,7 @@
 local.properties
 **/build/
 *.iml
+.qa-fixture/
+android-qa-result.json
+app/src/androidTest/assets/song.m4a
+app/src/androidTest/assets/background.mp4
