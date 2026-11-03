@@ -35,6 +35,9 @@ jobs:
           sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
           gradle --no-daemon :app:testDeviceDebugUnitTest :app:testAutomationDebugUnitTest :app:assembleAutomationDebug :app:assembleAutomationDebugAndroidTest
       - name: Generate non-user protocol media
+        # FFmpeg is a host fixture generator only, not added to the Android app.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      - name: Encode non-user protocol media
         shell: python
         run: |
           import shutil, subprocess
