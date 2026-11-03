@@ -24,6 +24,8 @@ internal object QaConnection {
             val token = data.getString("token")
             require(token.isNotEmpty() && token.length <= 1024 && token.none { it.isWhitespace() })
             PairingStore(context).save(url.trim().trimEnd('/'), token)
+            // Drain the existing store's async write before committing its generation.
+            check(context.getSharedPreferences("cloud-pairing", Context.MODE_PRIVATE).edit().commit())
             check(settings.edit().putLong("generation", generation).commit())
             true
         }.getOrDefault(false)

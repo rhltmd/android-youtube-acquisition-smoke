@@ -1,7 +1,10 @@
 package com.automusicshorts.acquisitionsmoke
 
 import android.content.Intent
+import android.content.Context
 import android.media.MediaMetadataRetriever
+import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.uiautomator.By
@@ -62,6 +65,8 @@ class AutomationProtocolTest {
     @Test fun test02_realHttpMultipartReviewResumeAndDownload() {
         val upload = MobileUploadClient(::local)
         val source = PendingCloudUpload(asset("song.m4a"), "https://youtu.be/BaW_jenozKc", "Automation protocol fixture", 2000)
+        try { upload.upload(pairing().cloudUrl(), "deliberately-wrong-token", source) {}; fail("wrong auth must fail") }
+        catch (error: CloudBridgeException) { assertEquals("AUTH_FAILURE", error.category) }
         val first = upload.upload(pairing().cloudUrl(), pairing().token(), source) {}
         val repeated = upload.upload(pairing().cloudUrl(), pairing().token(), source) {}
         assertEquals(first.projectId, repeated.projectId)
@@ -140,14 +145,30 @@ class AutomationProtocolTest {
     }
 
     @Test fun test05_actualQaApkLaunches() {
+        val device = UiDevice.getInstance(instrumentation)
+        device.wakeUp()
+        device.executeShellCommand("wm dismiss-keyguard")
         val activity = instrumentation.startActivitySync(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        val result = JSONObject().put("result", "FAIL")
         try {
-            val device = UiDevice.getInstance(instrumentation)
-            assertTrue("start control visible", device.wait(Until.hasObject(By.text("다운로드 및 Cloud 프로젝트 생성")), 15000))
-            assertTrue("recent project control reachable", UiScrollable(UiSelector().scrollable(true))
+            instrumentation.runOnMainSync {
+                activity.window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN)
+                (activity.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+                    .hideSoftInputFromWindow(activity.window.decorView.windowToken, 0)
+            }
+            instrumentation.waitForIdleSync()
+            result.put("screen_on", device.isScreenOn).put("foreground_package", device.currentPackageName)
+            result.put("start_reachable", UiScrollable(UiSelector().scrollable(true))
+                .scrollIntoView(UiSelector().text("다운로드 및 Cloud 프로젝트 생성")))
+            assertTrue("start control reachable", result.getBoolean("start_reachable"))
+            result.put("recent_reachable", UiScrollable(UiSelector().scrollable(true))
                 .scrollIntoView(UiSelector().text("최근 Cloud 작업 이어보기")))
-            evidence("apk_ui_launch", JSONObject().put("result", "PASS").put("build", BuildConfig.BUILD_COMMIT))
-        } finally { instrumentation.runOnMainSync { activity.finish() } }
+            assertTrue("recent project control reachable", result.getBoolean("recent_reachable"))
+            result.put("result", "PASS").put("build", BuildConfig.BUILD_COMMIT)
+        } finally {
+            evidence("apk_ui_launch", result)
+            instrumentation.runOnMainSync { activity.finish() }
+        }
     }
 
     @Test fun test06_liveYoutubeAttemptIsReportedSeparately() {
@@ -157,7 +178,7 @@ class AutomationProtocolTest {
             YoutubeDL.getInstance().updateYoutubeDL(context, YoutubeDL.UpdateChannel.STABLE)
             report.put("version", YoutubeDL.getInstance().versionName(context) ?: "unknown")
             for ((kind, video, selector) in listOf(
-                Triple("song", "BaW_jenozKc", "bestaudio"),
+                Triple("song", "ukGZbsOO6mk", "bestaudio"),
                 Triple("background", "jNQXAC9IVRw", MainActivity.BACKGROUND_FORMAT_SELECTOR),
             )) {
                 val result = JSONObject()

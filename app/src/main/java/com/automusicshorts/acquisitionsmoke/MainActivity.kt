@@ -658,6 +658,10 @@ class MainActivity : Activity() {
     }
 
     private fun pairingSettings(): Pair<String, String>? {
+        if (QaConnection.refreshPairing(this)) {
+            cloudUrlInput.setText(pairingStore.cloudUrl())
+            tokenInput.setText(pairingStore.token())
+        }
         val cloudUrl = cloudUrlInput.text.toString().trim().trimEnd('/')
         val token = tokenInput.text.toString()
         val uri = runCatching { Uri.parse(cloudUrl) }.getOrNull()
