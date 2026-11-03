@@ -369,6 +369,7 @@ internal fun backgroundUploadFields(
 
 internal fun classifyHttpStatus(status: Int): String = when (status) {
     401, 403 -> "AUTH_FAILURE"
+    530 -> "SERVER_UNREACHABLE" // Cloudflare edge/origin boundary, not project creation.
     400, 413, 415, 422 -> "CLOUD_VALIDATION_FAILURE"
     in 500..599 -> "PROJECT_CREATION_FAILURE"
     else -> "UPLOAD_FAILURE"

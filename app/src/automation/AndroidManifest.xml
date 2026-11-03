@@ -1,0 +1,4 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Protocol-fixture HTTP is permitted only on device loopback, never Cloud hosts. -->
+    <application android:networkSecurityConfig="@xml/qa_network_security" />
+</manifest>

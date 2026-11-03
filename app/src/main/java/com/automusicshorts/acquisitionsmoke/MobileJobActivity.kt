@@ -43,6 +43,7 @@ class MobileJobActivity : Activity() {
         super.onCreate(savedInstanceState)
         projectId = intent.getStringExtra("project_id").orEmpty()
         val pairing = PairingStore(this)
+        QaConnection.refreshPairing(this)
         if (!Regex("[0-9a-f]{32}").matches(projectId)) { finish(); return }
         client = MobileJobClient(pairing.cloudUrl(), pairing.token())
         val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 32, 24, 24) }
@@ -77,7 +78,13 @@ class MobileJobActivity : Activity() {
     private fun runTask(action: () -> Unit) {
         if (!busy.compareAndSet(false, true)) return
         executor.execute {
-            try { action() } catch (error: Exception) { showError(error) }
+            try {
+                if (QaConnection.refreshPairing(this)) {
+                    val pairing = PairingStore(this)
+                    client = MobileJobClient(pairing.cloudUrl(), pairing.token())
+                }
+                action()
+            } catch (error: Exception) { showError(error) }
             finally {
                 busy.set(false)
                 handler.post { if (visible && pollAgain) { handler.removeCallbacks(poll); handler.postDelayed(poll, 5000) } }

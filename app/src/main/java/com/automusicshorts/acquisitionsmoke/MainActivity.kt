@@ -67,6 +67,7 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         pairingStore = PairingStore(this)
+        QaConnection.refreshPairing(this)
         recoveryStore = AcquisitionRecoveryStore(File(filesDir, "acquisition-recovery.properties"),
             File(cacheDir, "youtube-acquisition-smoke"))
         setContentView(buildUi())
@@ -82,6 +83,10 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        if (QaConnection.refreshPairing(this)) {
+            cloudUrlInput.setText(pairingStore.cloudUrl())
+            tokenInput.setText(pairingStore.token())
+        }
         if (waitingForPreviousActivity) recoveryHandler.post(recoverWhenIdle)
     }
 

@@ -1,0 +1,115 @@
+name: Android emulator automation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/mobile-test-automation]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-automation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  emulator:
+    # Standard public-repository runner only. No paid/larger runners or secrets.
+    if: github.event.repository.private == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Build device and automation tests plus actual QA APK
+        run: |
+          sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+          gradle --no-daemon :app:testDeviceDebugUnitTest :app:testAutomationDebugUnitTest :app:assembleAutomationDebug :app:assembleAutomationDebugAndroidTest
+      - name: Generate non-user protocol media
+        shell: python
+        run: |
+          import shutil, subprocess
+          from pathlib import Path
+          root = Path('.qa-fixture')
+          root.mkdir(mode=0o700)
+          assert shutil.which('ffmpeg'), 'Standard runner FFmpeg missing'
+          common = ['ffmpeg', '-hide_banner', '-loglevel', 'error']
+          subprocess.run(common + ['-f','lavfi','-i','sine=frequency=440:duration=2','-c:a','aac',str(root/'song.m4a')], check=True)
+          subprocess.run(common + ['-f','lavfi','-i','testsrc2=size=320x240:rate=30:duration=2','-c:v','libx264','-pix_fmt','yuv420p',str(root/'background.mp4')], check=True)
+          subprocess.run(common + ['-f','lavfi','-i','testsrc2=size=1080x1920:rate=30:duration=2','-f','lavfi','-i','sine=frequency=440:duration=2','-c:v','libx264','-preset','ultrafast','-threads','2','-pix_fmt','yuv420p','-c:a','aac','-movflags','+faststart',str(root/'final.mp4')], check=True)
+      - name: Add fixture assets to instrumentation APK
+        shell: bash
+        run: |
+          mkdir -p app/src/androidTest/assets
+          cp .qa-fixture/song.m4a .qa-fixture/background.mp4 app/src/androidTest/assets/
+          gradle --no-daemon :app:assembleAutomationDebugAndroidTest
+          python scripts/qa_fixture_server.py .qa-fixture > .qa-fixture/server-private.log 2>&1 &
+      - name: Enable KVM for the ephemeral emulator runner
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Execute actual QA APK on Android emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_2
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: |
+            adb reverse tcp:18765 tcp:18765
+            adb install app/build/outputs/apk/automation/debug/app-automation-debug.apk
+            adb install app/build/outputs/apk/androidTest/automation/debug/app-automation-debug-androidTest.apk
+            adb exec-in run-as com.automusicshorts.acquisitionsmoke.audio.e2eqa.automation sh -c 'umask 077; mkdir -p files; cat > files/qa-connection.json' < .qa-fixture/connection.json
+            adb shell am instrument -w -r -e class com.automusicshorts.acquisitionsmoke.AutomationProtocolTest com.automusicshorts.acquisitionsmoke.audio.e2eqa.automation.test/androidx.test.runner.AndroidJUnitRunner > .qa-fixture/instrument-private.log 2>&1
+            adb exec-out run-as com.automusicshorts.acquisitionsmoke.audio.e2eqa.automation cat files/qa-automation-result.json > android-qa-result.json
+      - name: Verify sanitized execution evidence and packaged identity
+        shell: python
+        run: |
+          import hashlib, json, os, re, subprocess, xml.etree.ElementTree as ET
+          from pathlib import Path
+          log = Path('.qa-fixture/instrument-private.log').read_text()
+          assert 'OK (6 tests)' in log and 'FAILURES!!!' not in log, 'Instrumentation failed; private logs retained only on runner'
+          result = json.loads(Path('android-qa-result.json').read_text())
+          for stage in ('native_runtime','http_protocol_fixture','private_connection_refresh','apk_ui_launch'):
+              assert result[stage]['result'] == 'PASS', stage
+          result['instrumented_tests'] = 6
+          result['source_commit'] = os.environ['GITHUB_SHA']
+          result['unit_tests'] = {}
+          for variant in ('testDeviceDebugUnitTest','testAutomationDebugUnitTest'):
+              suites = [ET.parse(p).getroot() for p in Path('app/build/test-results', variant).glob('TEST-*.xml')]
+              assert suites
+              assert sum(int(s.get('failures',0))+int(s.get('errors',0)) for s in suites) == 0
+              result['unit_tests'][variant] = sum(int(s.get('tests',0)) for s in suites)
+          apk = Path('app/build/outputs/apk/automation/debug/app-automation-debug.apk')
+          tools = Path(os.environ['ANDROID_HOME'])/'build-tools'/'35.0.0'
+          badging = subprocess.check_output([str(tools/'aapt'),'dump','badging',str(apk)],text=True)
+          identity = re.search(r"^package: name='([^']+)'", badging, re.M).group(1)
+          assert identity == 'com.automusicshorts.acquisitionsmoke.audio.e2eqa.automation'
+          signature = subprocess.check_output([str(tools/'apksigner'),'verify','--print-certs',str(apk)],text=True)
+          result['application_id'] = identity
+          result['apk_sha256'] = hashlib.sha256(apk.read_bytes()).hexdigest()
+          result['signer_certificate_sha256'] = re.search(r'SHA-256 digest: ([0-9a-f]+)',signature).group(1)
+          Path('android-qa-result.json').write_text(json.dumps(result,indent=2))
+          print(json.dumps(result,indent=2))
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-automation-qa
+          path: |
+            app/build/outputs/apk/automation/debug/app-automation-debug.apk
+            android-qa-result.json
+            app/build/test-results/**/TEST-*.xml
+          if-no-files-found: warn
+          retention-days: 7

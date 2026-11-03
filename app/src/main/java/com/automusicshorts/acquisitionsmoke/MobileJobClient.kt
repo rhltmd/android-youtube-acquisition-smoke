@@ -62,6 +62,12 @@ internal class MobileJobClient(
                 throw CloudBridgeException(classifyHttpStatus(status), "HTTP $status: $code")
             }
             return JSONObject(text)
+        } catch (error: java.io.IOException) {
+            if (error is java.net.UnknownHostException || error is java.net.ConnectException ||
+                error is java.net.SocketTimeoutException) {
+                throw CloudBridgeException("SERVER_UNREACHABLE", "Cloud connection unavailable", error)
+            }
+            throw error
         } finally {
             conn.disconnect()
         }
@@ -96,6 +102,12 @@ internal class MobileJobClient(
             }
             require(partial.renameTo(target)) { "영상 저장에 실패했습니다." }
             return target
+        } catch (error: java.io.IOException) {
+            if (error is java.net.UnknownHostException || error is java.net.ConnectException ||
+                error is java.net.SocketTimeoutException) {
+                throw CloudBridgeException("SERVER_UNREACHABLE", "Cloud download connection unavailable", error)
+            }
+            throw error
         } finally {
             partial.delete()
             conn.disconnect()

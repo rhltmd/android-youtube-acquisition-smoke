@@ -92,6 +92,35 @@ class MobileJobClientTest {
         assertTrue(connection.closed)
     }
 
+    @Test fun tunnel530PreservesExistingVideoAndIsNotAnAuthOrProjectFailure() {
+        val id = "a".repeat(32)
+        val directory = temporary.newFolder()
+        val existing = File(directory, "music-shorts-$id.mp4").apply { writeText("previous-video") }
+        val connection = DownloadConnection(URL("https://example.com"), byteArrayOf(), status = 530)
+        val client = MobileJobClient("https://example.com", "test-only-token") { connection }
+        val error = assertThrows(CloudBridgeException::class.java) { client.download(id, directory) }
+        assertEquals("SERVER_UNREACHABLE", error.category)
+        assertEquals("previous-video", existing.readText())
+        assertFalse(File(directory, existing.name + ".part").exists())
+    }
+
+    @Test fun dnsFailureIsSanitizedAndKeepsPreviousDownload() {
+        val id = "a".repeat(32)
+        val directory = temporary.newFolder()
+        val existing = File(directory, "music-shorts-$id.mp4").apply { writeText("previous-video") }
+        val connection = object : HttpURLConnection(URL("https://example.com")) {
+            override fun connect() = Unit
+            override fun disconnect() = Unit
+            override fun usingProxy() = false
+            override fun getResponseCode(): Int = throw java.net.UnknownHostException("sensitive-host")
+        }
+        val client = MobileJobClient("https://example.com", "test-only-token") { connection }
+        val error = assertThrows(CloudBridgeException::class.java) { client.download(id, directory) }
+        assertEquals("SERVER_UNREACHABLE", error.category)
+        assertFalse(error.message.orEmpty().contains("sensitive-host"))
+        assertEquals("previous-video", existing.readText())
+    }
+
     @Test fun projectRoutesUseHttpsAndServerRoot() {
         val id = "a".repeat(32)
         for (action in listOf("start", "status", "review", "review-line", "retry", "download")) {
