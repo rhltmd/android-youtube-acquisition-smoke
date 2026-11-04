@@ -2,14 +2,19 @@ package com.automusicshorts.acquisitionsmoke
 
 import android.content.Intent
 import android.content.Context
+import android.content.ContentUris
 import android.media.MediaMetadataRetriever
 import android.graphics.Rect
+import android.os.Environment
+import android.os.SystemClock
+import android.provider.MediaStore
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.EditText
+import android.widget.TextView
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.uiautomator.UiDevice
@@ -51,6 +56,103 @@ class AutomationProtocolTest {
         file.parentFile!!.mkdirs()
         if (!file.isFile) instrumentation.context.assets.open(name).use { input -> file.outputStream().use { output -> input.copyTo(output) } }
         return file
+    }
+
+    private fun awaitActivity(activity: android.app.Activity, condition: (List<View>) -> Boolean) {
+        val deadline = SystemClock.elapsedRealtime() + 30_000
+        while (SystemClock.elapsedRealtime() < deadline) {
+            var ready = false
+            instrumentation.runOnMainSync {
+                val views = mutableListOf<View>()
+                fun collect(view: View) {
+                    views.add(view)
+                    if (view is ViewGroup) for (index in 0 until view.childCount) collect(view.getChildAt(index))
+                }
+                collect(activity.window.decorView)
+                ready = condition(views)
+            }
+            if (ready) return
+            SystemClock.sleep(100)
+        }
+        fail("Actual Activity did not reach the expected download/storage state")
+    }
+
+    @Test fun test07_actualDownloadButtonPublishesReadableMediaStoreVideo() {
+        // The HTTP backend is scripted. Only the connection factory is injected;
+        // the real Activity button, downloader and MediaStore publishing code run.
+        // No real Cloud credential or user project is available in this emulator.
+        assertTrue(client().request(id, "status").getBoolean("download_ready"))
+        val resolver = context.contentResolver
+        val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+        fun publishedIds(): Set<Long> {
+            val ids = mutableSetOf<Long>()
+            resolver.query(collection, arrayOf(MediaStore.Downloads._ID),
+                "${MediaStore.Downloads.RELATIVE_PATH}=? AND ${MediaStore.Downloads.IS_PENDING}=0",
+                arrayOf(Environment.DIRECTORY_DOWNLOADS + "/MusicShorts/"), null)!!.use { cursor ->
+                while (cursor.moveToNext()) ids.add(cursor.getLong(0))
+            }
+            return ids
+        }
+        val before = publishedIds()
+        val activity = instrumentation.startActivitySync(Intent(context, MobileJobActivity::class.java)
+            .putExtra("project_id", id).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        val result = JSONObject().put("result", "FAIL")
+        try {
+            // onCreate may already have begun a status request. Wait for that
+            // one task to finish before substituting the loopback test client.
+            val busy = MobileJobActivity::class.java.getDeclaredField("busy").apply { isAccessible = true }
+                .get(activity) as java.util.concurrent.atomic.AtomicBoolean
+            val deadline = SystemClock.elapsedRealtime() + 30_000
+            while (busy.get() && SystemClock.elapsedRealtime() < deadline) SystemClock.sleep(100)
+            assertFalse("initial Activity request finished", busy.get())
+            instrumentation.runOnMainSync {
+                MobileJobActivity::class.java.getDeclaredField("client").apply { isAccessible = true }
+                    .set(activity, client())
+            }
+            awaitActivity(activity) { views ->
+                views.filterIsInstance<Button>().single { it.text.toString() == "상태 다시 확인" }.performClick()
+                true
+            }
+            awaitActivity(activity) { views ->
+                views.filterIsInstance<Button>().single { it.text.toString() == "완성 MP4 다운로드" }.isShown
+            }
+            awaitActivity(activity) { views ->
+                val button = views.filterIsInstance<Button>().single { it.text.toString() == "완성 MP4 다운로드" }
+                button.requestRectangleOnScreen(Rect(0, 0, button.width, button.height), true)
+                assertTrue(button.isShown && button.getGlobalVisibleRect(Rect()))
+                button.performClick()
+                true
+            }
+            awaitActivity(activity) { views ->
+                views.filterIsInstance<TextView>().any { it.text.toString().startsWith("MP4 저장 완료") }
+            }
+            val created = publishedIds() - before
+            assertEquals("one published Downloads item", 1, created.size)
+            val uri = ContentUris.withAppendedId(collection, created.single())
+            assertEquals("video/mp4", resolver.getType(uri))
+            val file = File(context.filesDir, "finished-videos/music-shorts-$id.mp4")
+            val expected = MessageDigest.getInstance("SHA-256").digest(file.readBytes())
+            val exported = resolver.openInputStream(uri)!!.use { it.readBytes() }
+            assertEquals(file.length(), exported.size.toLong())
+            assertArrayEquals(expected, MessageDigest.getInstance("SHA-256").digest(exported))
+            val media = MediaMetadataRetriever()
+            try {
+                media.setDataSource(context, uri)
+                assertEquals("yes", media.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO))
+                assertEquals("yes", media.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO))
+                assertTrue(media.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)!!.toLong() > 0)
+            } finally { media.release() }
+            // Private restart fixture, not published in logs/artifacts.
+            File(context.filesDir, "qa-media-publish.json").writeText(JSONObject()
+                .put("uri", uri.toString()).put("bytes", file.length())
+                .put("sha256", expected.joinToString("") { "%02x".format(it) }).toString())
+            result.put("result", "PASS").put("actual_button", true).put("published_to_downloads", true)
+                .put("pending_cleared", true).put("hash_matches", true).put("android_media_validation", "PASS")
+                .put("transport", "INJECTED LOOPBACK SCRIPTED BACKEND - NOT CLOUD E2E")
+        } finally {
+            evidence("download_public_storage", result)
+            instrumentation.runOnMainSync { activity.finish() }
+        }
     }
 
     @Test fun test01_privatePairingImportAndNativeEngine() {
