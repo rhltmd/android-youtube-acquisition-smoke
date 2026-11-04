@@ -75,17 +75,25 @@ jobs:
             adb install app/build/outputs/apk/automation/debug/app-automation-debug.apk
             adb install app/build/outputs/apk/androidTest/automation/debug/app-automation-debug-androidTest.apk
             adb exec-in run-as com.automusicshorts.acquisitionsmoke.audio.e2eqa.automation sh -c 'umask 077; mkdir -p files; cat > files/qa-connection.json' < .qa-fixture/connection.json
-            adb shell am instrument -w -r -e class com.automusicshorts.acquisitionsmoke.AutomationProtocolTest com.automusicshorts.acquisitionsmoke.audio.e2eqa.automation.test/androidx.test.runner.AndroidJUnitRunner > .qa-fixture/instrument-private.log 2>&1
+            adb shell am instrument -w -r -e class com.automusicshorts.acquisitionsmoke.AutomationProtocolTest com.automusicshorts.acquisitionsmoke.audio.e2eqa.automation.test/androidx.test.runner.AndroidJUnitRunner > .qa-fixture/instrument-private.log 2>&1 || echo "$?" > .qa-fixture/instrument-exit-code.txt
+            adb logcat -d -b crash > .qa-fixture/crash-private.log
             adb shell am force-stop com.automusicshorts.acquisitionsmoke.audio.e2eqa.automation
-            adb shell am instrument -w -r -e class com.automusicshorts.acquisitionsmoke.AutomationResumeTest com.automusicshorts.acquisitionsmoke.audio.e2eqa.automation.test/androidx.test.runner.AndroidJUnitRunner > .qa-fixture/resume-private.log 2>&1
-            adb exec-out run-as com.automusicshorts.acquisitionsmoke.audio.e2eqa.automation cat files/qa-automation-result.json > android-qa-result.json
+            adb shell am instrument -w -r -e class com.automusicshorts.acquisitionsmoke.AutomationResumeTest com.automusicshorts.acquisitionsmoke.audio.e2eqa.automation.test/androidx.test.runner.AndroidJUnitRunner > .qa-fixture/resume-private.log 2>&1 || echo "$?" > .qa-fixture/resume-exit-code.txt
+            adb exec-out run-as com.automusicshorts.acquisitionsmoke.audio.e2eqa.automation cat files/qa-automation-result.json > android-qa-result.json || true
       - name: Verify sanitized execution evidence and packaged identity
+        if: always()
         shell: python
         run: |
           import hashlib, json, os, re, subprocess, xml.etree.ElementTree as ET
           from pathlib import Path
-          log = Path('.qa-fixture/instrument-private.log').read_text()
-          result = json.loads(Path('android-qa-result.json').read_text())
+          def private_log(name):
+              path = Path('.qa-fixture', name)
+              return path.read_text() if path.exists() else ''
+          log = private_log('instrument-private.log')
+          try:
+              result = json.loads(Path('android-qa-result.json').read_text())
+          except (OSError, ValueError):
+              result = {'actual_device_e2e': 'NOT TESTED', 'execution_evidence': 'MISSING'}
           # Report only method names / exception classes, never raw stacks or secrets.
           failed = []
           current = None
@@ -96,8 +104,18 @@ jobs:
                   kind = re.match(r'[A-Za-z0-9_.$]+',line.split('=',1)[1])
                   failed.append({'test':current,'exception':kind.group(0) if kind else 'suppressed'})
           result['instrumentation_failures'] = failed
+          # Raw crash output may include input/connection data: keep it private.
+          # Only method identifiers, exception classes and signal numbers escape.
+          crash = private_log('crash-private.log')
+          result['runner_diagnostics'] = {
+              'last_test': current,
+              'process_crashed': 'Process crashed' in log,
+              'exception_classes': sorted(set(re.findall(r'\b(?:java|kotlin|android)\.[A-Za-z0-9_.$]+(?:Exception|Error)\b', crash))),
+              'native_signals': re.findall(r'signal (\d+) \((SIG[A-Z]+)\)', crash),
+              'exit_code': private_log('instrument-exit-code.txt').strip() or '0',
+          }
           Path('android-qa-result.json').write_text(json.dumps(result,indent=2))
-          print(json.dumps({'instrumentation_failures':failed}))
+          print(json.dumps({'instrumentation_failures':failed, 'runner_diagnostics':result['runner_diagnostics']}))
           assert 'OK (7 tests)' in log and 'FAILURES!!!' not in log, 'Instrumentation failed; private logs not published'
           resume_log = Path('.qa-fixture/resume-private.log').read_text()
           assert 'OK (1 test)' in resume_log and 'FAILURES!!!' not in resume_log, 'Process resume test failed'
