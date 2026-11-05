@@ -179,6 +179,10 @@ class AutomationProtocolTest {
         val file = File(context.filesDir, "finished-videos/music-shorts-$id.mp4")
         assertTrue("previous successful download exists", file.isFile)
         val previous = file.readBytes()
+        val songCache = File(context.cacheDir, "automation-fixture/song.m4a")
+        val backgroundCache = File(context.cacheDir, "automation-fixture/background.mp4")
+        val songBytes = songCache.readBytes()
+        val backgroundBytes = backgroundCache.readBytes()
         val publications = publishedIds()
         val activity = instrumentation.startActivitySync(Intent(context, MobileJobActivity::class.java)
             .putExtra("project_id", id).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
@@ -213,8 +217,8 @@ class AutomationProtocolTest {
             assertArrayEquals("completed file preserved", previous, file.readBytes())
             assertFalse("partial removed", File(file.parentFile, file.name + ".part").exists())
             assertEquals("failed transfer must not publish", publications, publishedIds())
-            assertTrue(asset("song.m4a").isFile)
-            assertTrue(asset("background.mp4").isFile)
+            assertArrayEquals("song cache unchanged without fixture recreation", songBytes, songCache.readBytes())
+            assertArrayEquals("background cache unchanged without fixture recreation", backgroundBytes, backgroundCache.readBytes())
             val restored = AcquisitionRecoveryStore(File(context.filesDir, "qa-recovery.properties"),
                 File(context.cacheDir, "automation-fixture")).load()!!
             assertEquals(id, restored.projectId)
@@ -228,6 +232,8 @@ class AutomationProtocolTest {
             assertEquals(before.getInt("download_attempts") + 2, after.getInt("download_attempts"))
             assertEquals(before.getInt("truncated_downloads") + 1, after.getInt("truncated_downloads"))
             assertArrayEquals(previous, file.readBytes())
+            assertArrayEquals(songBytes, songCache.readBytes())
+            assertArrayEquals(backgroundBytes, backgroundCache.readBytes())
             val created = publishedIds() - publications
             assertEquals(1, created.size)
             val uri = ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, created.single())
