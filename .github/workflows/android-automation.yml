@@ -116,12 +116,12 @@ jobs:
           }
           Path('android-qa-result.json').write_text(json.dumps(result,indent=2))
           print(json.dumps({'instrumentation_failures':failed, 'runner_diagnostics':result['runner_diagnostics']}))
-          assert 'OK (7 tests)' in log and 'FAILURES!!!' not in log, 'Instrumentation failed; private logs not published'
+          assert 'OK (8 tests)' in log and 'FAILURES!!!' not in log, 'Instrumentation failed; private logs not published'
           resume_log = Path('.qa-fixture/resume-private.log').read_text()
           assert 'OK (1 test)' in resume_log and 'FAILURES!!!' not in resume_log, 'Process resume test failed'
-          for stage in ('native_runtime','http_protocol_fixture','private_connection_refresh','apk_ui_launch','download_public_storage','actual_process_restart'):
+          for stage in ('native_runtime','http_protocol_fixture','private_connection_refresh','apk_ui_launch','download_public_storage','interrupted_download_retry','actual_process_restart'):
               assert result[stage]['result'] == 'PASS', stage
-          result['instrumented_tests'] = 8
+          result['instrumented_tests'] = 9
           result['source_commit'] = os.environ['GITHUB_SHA']
           result['unit_tests'] = {}
           for variant in ('testDeviceDebugUnitTest','testAutomationDebugUnitTest'):

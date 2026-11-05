@@ -155,6 +155,96 @@ class AutomationProtocolTest {
         }
     }
 
+    @Test fun test08_interruptedDownloadRetriesWithoutUploadOrProcessing() {
+        // Existing production Activity/client + real truncated HTTP response.
+        // The server is still a loopback protocol fixture, not V2 providers.
+        fun control(path: String, method: String = "GET"): JSONObject {
+            val conn = local(URL("https://qa.invalid$path"))
+            conn.requestMethod = method
+            conn.setRequestProperty(MOBILE_UPLOAD_TOKEN_HEADER, pairing().token())
+            return try {
+                assertEquals(200, conn.responseCode)
+                JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
+            } finally { conn.disconnect() }
+        }
+        fun publishedIds(): Set<Long> {
+            val ids = mutableSetOf<Long>()
+            context.contentResolver.query(MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                arrayOf(MediaStore.Downloads._ID), "${MediaStore.Downloads.RELATIVE_PATH}=?",
+                arrayOf(Environment.DIRECTORY_DOWNLOADS + "/MusicShorts/"), null)!!.use { cursor ->
+                while (cursor.moveToNext()) ids.add(cursor.getLong(0))
+            }
+            return ids // Include pending entries: a failed transfer must not publish either kind.
+        }
+        val file = File(context.filesDir, "finished-videos/music-shorts-$id.mp4")
+        assertTrue("previous successful download exists", file.isFile)
+        val previous = file.readBytes()
+        val publications = publishedIds()
+        val activity = instrumentation.startActivitySync(Intent(context, MobileJobActivity::class.java)
+            .putExtra("project_id", id).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        val result = JSONObject().put("result", "FAIL")
+        try {
+            val busy = MobileJobActivity::class.java.getDeclaredField("busy").apply { isAccessible = true }
+                .get(activity) as java.util.concurrent.atomic.AtomicBoolean
+            val deadline = SystemClock.elapsedRealtime() + 30_000
+            while (busy.get() && SystemClock.elapsedRealtime() < deadline) SystemClock.sleep(100)
+            assertFalse("initial request finished", busy.get())
+            instrumentation.runOnMainSync {
+                MobileJobActivity::class.java.getDeclaredField("client").apply { isAccessible = true }
+                    .set(activity, client())
+            }
+            awaitActivity(activity) { views ->
+                views.filterIsInstance<Button>().single { it.text.toString() == "상태 다시 확인" }.performClick()
+                true
+            }
+            awaitActivity(activity) { views -> !busy.get() && views.filterIsInstance<Button>()
+                .single { it.text.toString() == "완성 MP4 다운로드" }.isShown }
+            val before = control("/qa-evidence")
+            control("/qa-truncate-next-download", "POST")
+            fun clickDownload() = awaitActivity(activity) { views ->
+                val button = views.filterIsInstance<Button>().single { it.text.toString() == "완성 MP4 다운로드" }
+                assertTrue(button.isShown)
+                button.performClick()
+                true
+            }
+            clickDownload()
+            awaitActivity(activity) { views -> !busy.get() && views.filterIsInstance<TextView>()
+                .any { it.text.toString().startsWith("Cloud 연결/처리에 실패했습니다.") } }
+            assertArrayEquals("completed file preserved", previous, file.readBytes())
+            assertFalse("partial removed", File(file.parentFile, file.name + ".part").exists())
+            assertEquals("failed transfer must not publish", publications, publishedIds())
+            assertTrue(asset("song.m4a").isFile)
+            assertTrue(asset("background.mp4").isFile)
+            val restored = AcquisitionRecoveryStore(File(context.filesDir, "qa-recovery.properties"),
+                File(context.cacheDir, "automation-fixture")).load()!!
+            assertEquals(id, restored.projectId)
+            clickDownload() // Retry only the existing download button, never acquisition/start/review.
+            awaitActivity(activity) { views -> !busy.get() && views.filterIsInstance<TextView>()
+                .any { it.text.toString().startsWith("MP4 저장 완료") } }
+            val after = control("/qa-evidence")
+            for (field in listOf("project_count", "source_attempts", "background_attempts", "start_attempts", "review_attempts")) {
+                assertEquals("no extra $field on download retry", before.getInt(field), after.getInt(field))
+            }
+            assertEquals(before.getInt("download_attempts") + 2, after.getInt("download_attempts"))
+            assertEquals(before.getInt("truncated_downloads") + 1, after.getInt("truncated_downloads"))
+            assertArrayEquals(previous, file.readBytes())
+            val created = publishedIds() - publications
+            assertEquals(1, created.size)
+            val uri = ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, created.single())
+            val exported = context.contentResolver.openInputStream(uri)!!.use { it.readBytes() }
+            assertArrayEquals(previous, exported)
+            result.put("result", "PASS").put("real_truncated_http_body", true)
+                .put("actual_button_retry", true).put("previous_file_preserved", true)
+                .put("partial_removed", true).put("new_uploads", 0).put("new_start_requests", 0)
+                .put("new_review_approvals", 0).put("download_attempts", 2)
+                .put("published_hash_matches", true).put("project_and_cache_preserved", true)
+                .put("transport", "LOOPBACK SCRIPTED BACKEND - NOT CLOUD E2E")
+        } finally {
+            evidence("interrupted_download_retry", result)
+            instrumentation.runOnMainSync { activity.finish() }
+        }
+    }
+
     @Test fun test01_privatePairingImportAndNativeEngine() {
         assertTrue(BuildConfig.APPLICATION_ID.endsWith(".automation"))
         assertTrue(QaConnection.refreshPairing(context))

@@ -22,7 +22,9 @@ fd = os.open(manifest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
 with os.fdopen(fd, "w") as stream:
     json.dump({"cloud_url": "https://qa.invalid", "token": token, "generation": time.time_ns()}, stream)
 
-state = {"status": "idle", "projects": {}, "source_attempts": 0, "background_attempts": 0}
+state = {"status": "idle", "projects": {}, "source_attempts": 0, "background_attempts": 0,
+         "start_attempts": 0, "review_attempts": 0, "download_attempts": 0,
+         "truncated_downloads": 0, "truncate_next_download": False}
 project_id = "a" * 32
 
 
@@ -95,14 +97,20 @@ class Handler(BaseHTTPRequestHandler):
                 state["background_attempts"] += 1
                 return self.reply(201, {"ok": True, "project_id": project_id, "uploaded_bytes": len(media), "duration_ms": 2000})
             if self.path.endswith("/start"):
+                state["start_attempts"] += 1
                 if state["status"] == "idle":
                     state["status"] = "needs_review"
                 return self.reply(200, self.status())
             if self.path.endswith("/review"):
                 body = json.loads(self.body())
                 assert body == {"approved": True, "revision": "b" * 64}
+                state["review_attempts"] += 1
                 state["status"] = "completed"
                 return self.reply(200, self.status())
+            if self.path == "/qa-truncate-next-download":
+                assert state["status"] == "completed"
+                state["truncate_next_download"] = True
+                return self.reply(200, {"ok": True})
             self.reply(404, {})
         except Exception:
             self.reply(422, {"ok": False, "error": "fixture_validation"})
@@ -116,7 +124,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/qa-evidence":
             return self.reply(200, {"project_count": len(state["projects"]), "source_attempts": state["source_attempts"],
-                "background_attempts": state["background_attempts"], "download_sha256": hashlib.sha256((root/"final.mp4").read_bytes()).hexdigest()})
+                "background_attempts": state["background_attempts"], "start_attempts": state["start_attempts"],
+                "review_attempts": state["review_attempts"], "download_attempts": state["download_attempts"],
+                "truncated_downloads": state["truncated_downloads"],
+                "download_sha256": hashlib.sha256((root/"final.mp4").read_bytes()).hexdigest()})
         if "/" + "0" * 28 + "0530/" in self.path:
             return self.reply(530, b"error code: 1033", "text/html")
         if self.path.endswith("/status"):
@@ -125,7 +136,22 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, {"ok": True, "revision": "b" * 64, "lines": [
                 {"line_id": "fixture-line", "japanese": "テスト", "korean": "시험", "start_ms": 0, "end_ms": 2000}]})
         if self.path.endswith("/download") and state["status"] == "completed":
-            return self.reply(200, (root/"final.mp4").read_bytes(), "video/mp4")
+            content = (root / "final.mp4").read_bytes()
+            state["download_attempts"] += 1
+            if state["truncate_next_download"]:
+                state["truncate_next_download"] = False
+                state["truncated_downloads"] += 1
+                # A real HTTP 200 with a broken body, not a mocked exception.
+                # Only this loopback test server has a fault-injection route.
+                self.send_response(200)
+                self.send_header("Content-Type", "video/mp4")
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                self.wfile.write(content[:max(1, len(content) // 2)])
+                self.wfile.flush()
+                self.close_connection = True
+                return
+            return self.reply(200, content, "video/mp4")
         return self.reply(404, {})
 
 
