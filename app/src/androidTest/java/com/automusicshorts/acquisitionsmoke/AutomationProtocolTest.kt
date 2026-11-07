@@ -3,6 +3,7 @@ package com.automusicshorts.acquisitionsmoke
 import android.content.Intent
 import android.content.Context
 import android.content.ContentUris
+import android.app.AlertDialog
 import android.media.MediaMetadataRetriever
 import android.graphics.Rect
 import android.os.Environment
@@ -16,6 +17,7 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.core.app.ActivityScenario
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.uiautomator.UiDevice
 import com.yausername.youtubedl_android.YoutubeDL
@@ -248,6 +250,46 @@ class AutomationProtocolTest {
         } finally {
             evidence("interrupted_download_retry", result)
             instrumentation.runOnMainSync { activity.finish() }
+        }
+    }
+
+    @Test fun test09_unsavedReviewDraftSurvivesActivityRecreation() {
+        val dialogField = MobileJobActivity::class.java.getDeclaredField("reviewEditDialog").apply { isAccessible = true }
+        val edit = MobileJobActivity::class.java
+            .getDeclaredMethod("editReviewLine", String::class.java, JSONObject::class.java)
+            .apply { isAccessible = true }
+        val intent = Intent(context, MobileJobActivity::class.java).putExtra("project_id", id)
+        val result = JSONObject().put("result", "FAIL")
+        fun fields(view: View): List<EditText> = when (view) {
+            is EditText -> listOf(view)
+            is ViewGroup -> (0 until view.childCount).flatMap { fields(view.getChildAt(it)) }
+            else -> emptyList()
+        }
+        fun dialog(activity: MobileJobActivity) = dialogField.get(activity) as AlertDialog
+        val values = listOf("未保存の日本語", "저장 전 한국어", "150", "900")
+        try {
+            ActivityScenario.launch<MobileJobActivity>(intent).use { scenario ->
+                scenario.onActivity { activity ->
+                    val line = JSONObject().put("line_id", "qa-line").put("japanese", "元")
+                        .put("korean", "원본").put("start_ms", 0).put("end_ms", 1000)
+                    edit.invoke(activity, "b".repeat(64), line)
+                    val editors = fields(dialog(activity).window!!.decorView)
+                    assertEquals(values.size, editors.size)
+                    editors.zip(values).forEach { (editor, value) -> editor.setText(value) }
+                }
+                scenario.recreate()
+                scenario.onActivity { activity ->
+                    val restored = dialog(activity)
+                    assertTrue(restored.isShowing)
+                    assertEquals(values, fields(restored.window!!.decorView).map { it.text.toString() })
+                    restored.getButton(AlertDialog.BUTTON_NEGATIVE).performClick()
+                }
+                scenario.recreate()
+                scenario.onActivity { activity -> assertNull(dialogField.get(activity)) }
+            }
+            result.put("result", "PASS")
+        } finally {
+            evidence("review_draft_recreation", result)
         }
     }
 

@@ -35,6 +35,8 @@ class MobileJobActivity : Activity() {
     private lateinit var download: Button
     private lateinit var retryProcessing: Button
     private var retryRevision: String? = null
+    private var reviewEditDialog: AlertDialog? = null
+    private var captureReviewDraft: (() -> Bundle)? = null
     private var visible = false
     private var pollAgain = true
     private val poll = Runnable { fetchStatus() }
@@ -61,6 +63,17 @@ class MobileJobActivity : Activity() {
         content.addView(retryProcessing)
         content.addView(Button(this).apply { text = "상태 다시 확인"; setOnClickListener { pollAgain = true; fetchStatus() } })
         setContentView(ScrollView(this).apply { addView(content) })
+        savedInstanceState?.getBundle("review_draft")?.let { draft ->
+            val revision = draft.getString("revision")
+            val lineId = draft.getString("line_id")
+            if (revision != null && lineId != null && draft.getString("project_id") == projectId) {
+                val line = JSONObject().put("line_id", lineId)
+                for (key in listOf("japanese", "korean", "start_ms", "end_ms")) {
+                    line.put(key, draft.getString(key).orEmpty())
+                }
+                editReviewLine(revision, line)
+            }
+        }
         if (savedInstanceState == null) runTask {
             // Idempotent server start never regenerates completed stages or
             // bypasses a pending review. Conflict can mean interrupted work.
@@ -73,7 +86,19 @@ class MobileJobActivity : Activity() {
 
     override fun onResume() { super.onResume(); visible = true; handler.postDelayed(poll, 1000) }
     override fun onPause() { visible = false; handler.removeCallbacks(poll); super.onPause() }
-    override fun onDestroy() { handler.removeCallbacksAndMessages(null); executor.shutdownNow(); super.onDestroy() }
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        if (reviewEditDialog?.isShowing == true) {
+            captureReviewDraft?.let { outState.putBundle("review_draft", it()) }
+        }
+    }
+
+    override fun onDestroy() {
+        handler.removeCallbacksAndMessages(null)
+        executor.shutdownNow()
+        reviewEditDialog?.dismiss()
+        super.onDestroy()
+    }
 
     private fun runTask(action: () -> Unit) {
         if (!busy.compareAndSet(false, true)) return
@@ -186,6 +211,24 @@ class MobileJobActivity : Activity() {
         val dialog = AlertDialog.Builder(this).setTitle("가사 한 줄 수정")
             .setView(ScrollView(this).apply { addView(content) })
             .setNegativeButton("취소", null).setPositiveButton("저장 후 다시 검토", null).create()
+        reviewEditDialog = dialog
+        captureReviewDraft = {
+            Bundle().apply {
+                putString("project_id", projectId)
+                putString("revision", revision)
+                putString("line_id", line.getString("line_id"))
+                putString("japanese", japanese.text.toString())
+                putString("korean", korean.text.toString())
+                putString("start_ms", start.text.toString())
+                putString("end_ms", end.text.toString())
+            }
+        }
+        dialog.setOnDismissListener {
+            if (reviewEditDialog === dialog) {
+                reviewEditDialog = null
+                captureReviewDraft = null
+            }
+        }
         dialog.show()
         val save = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
         save.setOnClickListener {
@@ -200,7 +243,13 @@ class MobileJobActivity : Activity() {
             runTask {
                 try {
                     val updated = client.request(projectId, "review-line", body)
-                    runOnUiThread { if (!isDestroyed) { dialog.dismiss(); showReview(updated) } }
+                    runOnUiThread {
+                        if (!isDestroyed) {
+                            if (reviewEditDialog === dialog) captureReviewDraft = null
+                            dialog.dismiss()
+                            showReview(updated)
+                        }
+                    }
                 } catch (error: Exception) {
                     runOnUiThread {
                         if (!isDestroyed) {
