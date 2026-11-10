@@ -36,7 +36,12 @@ jobs:
           gradle --no-daemon :app:testDeviceDebugUnitTest :app:testAutomationDebugUnitTest :app:assembleAutomationDebug :app:assembleAutomationDebugAndroidTest
       - name: Generate non-user protocol media
         # FFmpeg is a host fixture generator only, not added to the Android app.
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+        timeout-minutes: 4
+        run: |
+          if command -v ffmpeg >/dev/null; then exit 0; fi
+          apt_network=(-o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::ForceIPv4=true)
+          sudo apt-get "${apt_network[@]}" update -qq
+          sudo apt-get "${apt_network[@]}" install -y -qq --no-install-recommends ffmpeg
       - name: Encode non-user protocol media
         shell: python
         run: |
