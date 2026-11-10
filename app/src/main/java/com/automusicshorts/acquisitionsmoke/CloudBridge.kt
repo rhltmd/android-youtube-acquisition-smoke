@@ -75,14 +75,14 @@ class PairingStore(context: Context) {
             .apply()
     }
 
-    private fun encrypt(value: String): String {
+    internal fun encrypt(value: String): String {
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, secretKey())
         val encrypted = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
         return "${Base64.encodeToString(cipher.iv, Base64.NO_WRAP)}:${Base64.encodeToString(encrypted, Base64.NO_WRAP)}"
     }
 
-    private fun decrypt(value: String): String {
+    internal fun decrypt(value: String): String {
         val parts = value.split(":", limit = 2)
         require(parts.size == 2)
         val cipher = Cipher.getInstance(TRANSFORMATION)

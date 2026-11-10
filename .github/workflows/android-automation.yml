@@ -75,7 +75,7 @@ jobs:
             adb install app/build/outputs/apk/automation/debug/app-automation-debug.apk
             adb install app/build/outputs/apk/androidTest/automation/debug/app-automation-debug-androidTest.apk
             adb exec-in run-as com.automusicshorts.acquisitionsmoke.audio.e2eqa.automation sh -c 'umask 077; mkdir -p files; cat > files/qa-connection.json' < .qa-fixture/connection.json
-            adb shell am instrument -w -r -e class com.automusicshorts.acquisitionsmoke.AutomationProtocolTest,com.automusicshorts.acquisitionsmoke.BootstrapEnvelopeTest com.automusicshorts.acquisitionsmoke.audio.e2eqa.automation.test/androidx.test.runner.AndroidJUnitRunner > .qa-fixture/instrument-private.log 2>&1 || echo "$?" > .qa-fixture/instrument-exit-code.txt
+            adb shell am instrument -w -r -e class com.automusicshorts.acquisitionsmoke.AutomationProtocolTest,com.automusicshorts.acquisitionsmoke.BootstrapEnvelopeTest,com.automusicshorts.acquisitionsmoke.GithubBootstrapTest com.automusicshorts.acquisitionsmoke.audio.e2eqa.automation.test/androidx.test.runner.AndroidJUnitRunner > .qa-fixture/instrument-private.log 2>&1 || echo "$?" > .qa-fixture/instrument-exit-code.txt
             adb logcat -d -b crash > .qa-fixture/crash-private.log
             adb shell am force-stop com.automusicshorts.acquisitionsmoke.audio.e2eqa.automation
             adb shell am instrument -w -r -e class com.automusicshorts.acquisitionsmoke.AutomationResumeTest com.automusicshorts.acquisitionsmoke.audio.e2eqa.automation.test/androidx.test.runner.AndroidJUnitRunner > .qa-fixture/resume-private.log 2>&1 || echo "$?" > .qa-fixture/resume-exit-code.txt
@@ -116,12 +116,12 @@ jobs:
           }
           Path('android-qa-result.json').write_text(json.dumps(result,indent=2))
           print(json.dumps({'instrumentation_failures':failed, 'runner_diagnostics':result['runner_diagnostics']}))
-          assert 'OK (12 tests)' in log and 'FAILURES!!!' not in log, 'Instrumentation failed; private logs not published'
+          assert 'OK (16 tests)' in log and 'FAILURES!!!' not in log, 'Instrumentation failed; private logs not published'
           resume_log = Path('.qa-fixture/resume-private.log').read_text()
           assert 'OK (1 test)' in resume_log and 'FAILURES!!!' not in resume_log, 'Process resume test failed'
           for stage in ('native_runtime','http_protocol_fixture','private_connection_refresh','apk_ui_launch','download_public_storage','interrupted_download_retry','review_draft_recreation','actual_process_restart'):
               assert result[stage]['result'] == 'PASS', stage
-          result['instrumented_tests'] = 12
+          result['instrumented_tests'] = 16
           result['source_commit'] = os.environ['GITHUB_SHA']
           result['unit_tests'] = {}
           for variant in ('testDeviceDebugUnitTest','testAutomationDebugUnitTest'):

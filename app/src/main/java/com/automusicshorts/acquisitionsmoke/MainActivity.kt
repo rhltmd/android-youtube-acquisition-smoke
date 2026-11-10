@@ -48,6 +48,9 @@ class MainActivity : Activity() {
     }
 
     private lateinit var pairingStore: PairingStore
+    private lateinit var githubPairing: GithubPairing
+    private var githubLoginCancelled: AtomicBoolean? = null
+    private var githubLoginDialog: AlertDialog? = null
     private lateinit var cloudUrlInput: EditText
     private lateinit var tokenInput: EditText
     private lateinit var urlInput: EditText
@@ -67,6 +70,7 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         pairingStore = PairingStore(this)
+        githubPairing = GithubPairing(this)
         QaConnection.refreshPairing(this)
         recoveryStore = AcquisitionRecoveryStore(File(filesDir, "acquisition-recovery.properties"),
             File(cacheDir, "youtube-acquisition-smoke"))
@@ -99,6 +103,8 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        githubLoginCancelled?.set(true)
+        githubLoginDialog?.dismiss()
         recoveryHandler.removeCallbacksAndMessages(null)
         executor.shutdown() // Activity recreation must not start a competing acquisition.
         super.onDestroy()
@@ -137,6 +143,11 @@ class MainActivity : Activity() {
             maxLines = 1
         }
         content.addView(tokenInput, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+
+        if (BuildConfig.FLAVOR == "device") content.addView(Button(this).apply {
+            text = "GitHub 자동 연결 설정"
+            setOnClickListener { githubSettings() }
+        })
 
         urlInput = EditText(this).apply {
             hint = "https://www.youtube.com/watch?v=..."
@@ -179,11 +190,7 @@ class MainActivity : Activity() {
             text = "최근 Cloud 작업 이어보기"
             setOnClickListener {
                 val saved = getSharedPreferences("mobile-job", MODE_PRIVATE).getString("project_id", null)
-                val pairing = pairingSettings()
-                if (saved != null && pairing != null) {
-                    pairingStore.save(pairing.first, pairing.second)
-                    openCloudJob(saved)
-                }
+                if (saved != null) resumeCloudJob(saved)
             }
         })
 
@@ -241,27 +248,30 @@ class MainActivity : Activity() {
             backgroundUrlInput.error = "유효한 HTTPS YouTube URL을 입력해주세요."
             return
         }
-        val pairing = pairingSettings() ?: run {
+        val selected = pairingSettings() ?: run {
             running.set(false)
             return
         }
-        pairingStore.save(pairing.first, pairing.second)
-
         startButton.isEnabled = false
-        pendingUpload = null
-        pendingBackgroundUpload = null
-        pendingBackgroundUrl = backgroundUrl
-        createdProjectId = null
-        retryStage = null
-        retryButton.visibility = View.GONE
-        progressBar.visibility = View.VISIBLE
-        progressBar.progress = 0
-        statusText.text = "yt-dlp runtime 초기화 중"
-        resultText.text = "Network: ${networkLabel()}\n"
+        retryButton.isEnabled = false
 
         executor.execute {
             val workDir = File(cacheDir, "youtube-acquisition-smoke")
             try {
+                val pairing = resolvePairing(selected)
+                pendingUpload = null
+                pendingBackgroundUpload = null
+                pendingBackgroundUrl = backgroundUrl
+                createdProjectId = null
+                retryStage = null
+                runOnUiThread {
+                    if (isDestroyed) return@runOnUiThread
+                    retryButton.visibility = View.GONE
+                    progressBar.visibility = View.VISIBLE
+                    progressBar.progress = 0
+                    statusText.text = "yt-dlp runtime 초기화 중"
+                    resultText.text = "Network: ${networkLabel()}\n"
+                }
                 recoveryStore.clear()
                 recreateDirectory(workDir)
                 YoutubeDL.getInstance().init(applicationContext)
@@ -361,7 +371,11 @@ class MainActivity : Activity() {
                     .joinToString("\nCaused by: ")
                     .ifBlank { error.javaClass.name }
                 ui(
-                    status = if (pendingUpload == null) "Acquisition: FAIL" else "처리 중단 · 저장된 파일은 유지됩니다.",
+                    status = when {
+                        error is GithubBootstrapException || error is BootstrapEnvelopeException -> "자동 연결 실패"
+                        pendingUpload == null -> "Acquisition: FAIL"
+                        else -> "처리 중단 · 저장된 파일은 유지됩니다."
+                    },
                     retryVisible = retryStage != null,
                     details = buildString {
                         appendLine("Network: ${networkLabel()}")
@@ -375,7 +389,7 @@ class MainActivity : Activity() {
                 runOnUiThread {
                     if (isDestroyed) return@runOnUiThread
                     startButton.isEnabled = true
-                    progressBar.visibility = View.VISIBLE
+                    retryButton.isEnabled = true
                 }
             }
         }
@@ -383,16 +397,16 @@ class MainActivity : Activity() {
 
     private fun retryUpload() {
         if (!running.compareAndSet(false, true)) return
-        val pairing = pairingSettings() ?: run {
+        val selected = pairingSettings() ?: run {
             running.set(false)
             return
         }
-        pairingStore.save(pairing.first, pairing.second)
         startButton.isEnabled = false
         retryButton.isEnabled = false
         progressBar.progress = 0
         executor.execute {
             try {
+                val pairing = resolvePairing(selected)
                 // Persist the current boundary before a network retry, including recovery from disk errors.
                 saveRecovery(retryStage?.name ?: error("재시도할 단계가 없습니다."))
                 when (retryStage) {
@@ -657,13 +671,22 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun pairingSettings(): Pair<String, String>? {
+    private class PairingSelection(val manualUrl: String?, val token: String)
+
+    private fun pairingSettings(): PairingSelection? {
         if (QaConnection.refreshPairing(this)) {
             cloudUrlInput.setText(pairingStore.cloudUrl())
             tokenInput.setText(pairingStore.token())
         }
         val cloudUrl = cloudUrlInput.text.toString().trim().trimEnd('/')
         val token = tokenInput.text.toString()
+        if (BuildConfig.FLAVOR == "device" && githubPairing.enabled()) {
+            if (!Regex("[A-Za-z0-9_-]{43,128}").matches(token)) {
+                tokenInput.error = "GitHub 자동 연결용 Pairing token을 입력해주세요."
+                return null
+            }
+            return PairingSelection(null, token)
+        }
         val uri = runCatching { Uri.parse(cloudUrl) }.getOrNull()
         if (uri?.scheme?.equals("https", ignoreCase = true) != true || uri.host.isNullOrBlank()) {
             cloudUrlInput.error = "유효한 HTTPS Cloud URL을 입력해주세요."
@@ -673,7 +696,98 @@ class MainActivity : Activity() {
             tokenInput.error = "Pairing token을 입력해주세요."
             return null
         }
-        return cloudUrl to token
+        return PairingSelection(cloudUrl, token)
+    }
+
+    private fun resolvePairing(selection: PairingSelection): Pair<String, String> {
+        val url = selection.manualUrl ?: run {
+            ui("GitHub Codespace 연결 중")
+            githubPairing.resolve(selection.token)
+        }
+        if (selection.manualUrl != null) pairingStore.save(url, selection.token)
+        return url to selection.token
+    }
+
+    private fun resumeCloudJob(projectId: String) {
+        if (!running.compareAndSet(false, true)) return
+        val selected = pairingSettings()
+        if (selected == null) {
+            running.set(false)
+            return
+        }
+        startButton.isEnabled = false
+        executor.execute {
+            try {
+                resolvePairing(selected)
+                runOnUiThread { if (!isDestroyed) openCloudJob(projectId) }
+            } catch (error: Exception) {
+                ui("Cloud 작업 연결 실패", error.message)
+            } finally {
+                running.set(false)
+                runOnUiThread { if (!isDestroyed) startButton.isEnabled = true }
+            }
+        }
+    }
+
+    private fun githubSettings() {
+        if (running.get()) return
+        val dialog = AlertDialog.Builder(this).setTitle("GitHub 자동 연결")
+            .setMessage("이 앱은 지정된 2-core Codespace만 시작합니다. 시작 전 GitHub Codespaces 예산이 $0이며 유료 사용이 차단됐는지 확인해주세요.")
+            .setNegativeButton("닫기", null)
+            .setPositiveButton("GitHub에서 인증") { _, _ -> githubLogin() }
+        if (githubPairing.enabled()) {
+            dialog.setNeutralButton("수동 연결로 전환") { _, _ ->
+                githubPairing.signOut()
+                cloudUrlInput.setText(pairingStore.cloudUrl())
+                ui("수동 연결로 전환했습니다.")
+            }
+        }
+        dialog.show()
+    }
+
+    private fun githubLogin() {
+        if (!running.compareAndSet(false, true)) return
+        val cancelled = AtomicBoolean(false)
+        githubLoginCancelled = cancelled
+        startButton.isEnabled = false
+        ui("GitHub 인증 준비 중")
+        executor.execute {
+            try {
+                val bootstrap = GithubBootstrap()
+                val challenge = bootstrap.begin()
+                runOnUiThread {
+                    if (isDestroyed || cancelled.get()) return@runOnUiThread
+                    githubLoginDialog = AlertDialog.Builder(this).setTitle("GitHub 기기 인증")
+                        .setMessage("브라우저에서 다음 코드를 입력하세요.\n\n${challenge.userCode}")
+                        .setNegativeButton("취소") { _, _ -> cancelled.set(true) }
+                        .setPositiveButton("GitHub 열기", null)
+                        .setOnCancelListener { cancelled.set(true) }.create()
+                    githubLoginDialog?.show()
+                    githubLoginDialog?.getButton(AlertDialog.BUTTON_POSITIVE)?.setOnClickListener {
+                        try {
+                            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(GithubBootstrap.DEVICE_PAGE)))
+                        } catch (_: android.content.ActivityNotFoundException) {
+                            cancelled.set(true)
+                        }
+                    }
+                }
+                githubPairing.signIn(bootstrap, challenge) { cancelled.get() }
+                if (!cancelled.get()) ui("GitHub 자동 연결을 설정했습니다.")
+            } catch (error: Exception) {
+                if (!cancelled.get()) ui("GitHub 인증 실패", error.message)
+            } finally {
+                running.set(false)
+                runOnUiThread {
+                    githubLoginDialog?.dismiss()
+                    githubLoginDialog = null
+                    githubLoginCancelled = null
+                    if (!isDestroyed) {
+                        startButton.isEnabled = true
+                        if (cancelled.get()) statusText.text = "GitHub 인증이 취소됐습니다."
+                    }
+                }
+            }
+        }
     }
 
     private fun normalizeYoutubeUrl(raw: String): String? {
