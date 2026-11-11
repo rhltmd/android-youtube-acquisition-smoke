@@ -3,6 +3,8 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val parallelDeviceQa = providers.gradleProperty("parallelDeviceQa").orNull == "true"
+
 android {
     namespace = "com.automusicshorts.acquisitionsmoke"
     compileSdk = 35
@@ -22,6 +24,11 @@ android {
     productFlavors {
         create("device") {
             dimension = "qa"
+            if (parallelDeviceQa) {
+                applicationIdSuffix = ".bootstrapqa"
+                versionNameSuffix = "-bootstrap"
+                manifestPlaceholders["appLabel"] = "Music Shorts Bootstrap QA"
+            }
             ndk { abiFilters += "arm64-v8a" }
         }
         create("automation") {
