@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   build:
+    if: github.ref != 'refs/heads/codex/mobile-test-automation'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -85,5 +86,84 @@ jobs:
             app/build/outputs/apk/device/debug/app-device-debug.apk
             app-debug.apk.sha256
             qa-build-info.json
+          if-no-files-found: error
+          retention-days: 7
+
+  bootstrap:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/mobile-test-automation' && github.event.repository.private == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      BOOTSTRAP_SOURCE_SHA: 38a4d34db6ea2a019a37a90734c620966ac74b1e
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 38a4d34db6ea2a019a37a90734c620966ac74b1e
+          persist-credentials: false
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      - name: Build the pinned ARM64 Bootstrap QA APK
+        run: |
+          test "$(git rev-parse HEAD)" = "$BOOTSTRAP_SOURCE_SHA"
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+          GITHUB_SHA="$BOOTSTRAP_SOURCE_SHA" gradle --no-daemon -PparallelDeviceQa=true :app:assembleDeviceDebug
+
+      - name: Verify package identity, signature and SHA-256
+        shell: python
+        run: |
+          import hashlib
+          import json
+          import os
+          import re
+          import shutil
+          import subprocess
+          from pathlib import Path
+
+          source = Path("app/build/outputs/apk/device/debug/app-device-debug.apk")
+          apk = Path("Music-Shorts-Bootstrap-QA-arm64.apk")
+          shutil.copyfile(source, apk)
+          tools = Path(os.environ["ANDROID_HOME"]) / "build-tools" / "35.0.0"
+          badging = subprocess.check_output([str(tools / "aapt"), "dump", "badging", str(apk)], text=True)
+          package = re.search(r"^package: name='([^']+)'", badging, re.M).group(1)
+          label = re.search(r"^application-label:'([^']+)'", badging, re.M).group(1)
+          version = re.search(r" versionName='([^']+)'", badging).group(1)
+          assert package == "com.automusicshorts.acquisitionsmoke.audio.e2eqa.bootstrapqa"
+          assert label == "Music Shorts Bootstrap QA"
+          assert version == "0.2.0-e2e-qa-bootstrap"
+          assert re.search(r"^native-code: 'arm64-v8a'\s*$", badging, re.M)
+          signature = subprocess.check_output([str(tools / "apksigner"), "verify", "--print-certs", str(apk)], text=True)
+          signer = re.search(r"Signer #1 certificate SHA-256 digest: ([0-9a-f]{64})", signature).group(1)
+          digest = hashlib.sha256(apk.read_bytes()).hexdigest()
+          Path(apk.name + ".sha256").write_text(f"{digest}  {apk.name}\n", encoding="ascii")
+          evidence = {
+              "source_commit": os.environ["BOOTSTRAP_SOURCE_SHA"],
+              "application_id": package,
+              "application_label": label,
+              "version_name": version,
+              "apk_sha256": digest,
+              "signer_certificate_sha256": signer,
+          }
+          Path("bootstrap-qa-build-info.json").write_text(json.dumps(evidence, indent=2), encoding="utf-8")
+          print(json.dumps(evidence, indent=2))
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: music-shorts-bootstrap-qa-arm64-38a4d34
+          path: |
+            Music-Shorts-Bootstrap-QA-arm64.apk
+            Music-Shorts-Bootstrap-QA-arm64.apk.sha256
+            bootstrap-qa-build-info.json
           if-no-files-found: error
           retention-days: 7
