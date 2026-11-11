@@ -36,21 +36,20 @@ jobs:
           gradle --no-daemon :app:testDeviceDebugUnitTest :app:testAutomationDebugUnitTest :app:assembleAutomationDebug :app:assembleAutomationDebugAndroidTest
       - name: Generate non-user protocol media
         # FFmpeg is a host fixture generator only, not added to the Android app.
-        timeout-minutes: 4
+        timeout-minutes: 3
         run: |
-          if command -v ffmpeg >/dev/null; then exit 0; fi
-          apt_network=(-o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::ForceIPv4=true)
-          sudo apt-get "${apt_network[@]}" update -qq
-          sudo apt-get "${apt_network[@]}" install -y -qq --no-install-recommends ffmpeg
+          printf '%s\n' 'imageio-ffmpeg==0.6.0 --hash=sha256:c7e46fcec401dd990405049d2e2f475e2b397779df2519b544b8aab515195282' |
+            python -m pip --isolated --disable-pip-version-check install --target "$RUNNER_TEMP/music-ci-ffmpeg" --index-url https://pypi.org/simple --timeout 15 --retries 1 --only-binary=:all: --no-deps --require-hashes -r /dev/stdin
       - name: Encode non-user protocol media
         shell: python
         run: |
-          import shutil, subprocess
+          import os, subprocess, sys
           from pathlib import Path
+          sys.path.insert(0, str(Path(os.environ['RUNNER_TEMP']) / 'music-ci-ffmpeg'))
+          from imageio_ffmpeg import get_ffmpeg_exe
           root = Path('.qa-fixture')
           root.mkdir(mode=0o700)
-          assert shutil.which('ffmpeg'), 'Standard runner FFmpeg missing'
-          common = ['ffmpeg', '-hide_banner', '-loglevel', 'error']
+          common = [get_ffmpeg_exe(), '-hide_banner', '-loglevel', 'error']
           subprocess.run(common + ['-f','lavfi','-i','sine=frequency=440:duration=2','-c:a','aac',str(root/'song.m4a')], check=True)
           subprocess.run(common + ['-f','lavfi','-i','testsrc2=size=320x240:rate=30:duration=2','-c:v','libx264','-pix_fmt','yuv420p',str(root/'background.mp4')], check=True)
           subprocess.run(common + ['-f','lavfi','-i','testsrc2=size=1080x1920:rate=30:duration=2','-f','lavfi','-i','sine=frequency=440:duration=2','-c:v','libx264','-preset','ultrafast','-threads','2','-pix_fmt','yuv420p','-c:a','aac','-movflags','+faststart',str(root/'final.mp4')], check=True)
